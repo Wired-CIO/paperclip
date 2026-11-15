@@ -281,6 +281,35 @@ describeEmbeddedPostgres("agent routes honour project visibility", () => {
     expect(detail.status, detail.text).toBe(404);
   });
 
+  it("404s a hidden agent's sub-resources like a random id, for session and cloud_tenant operators", async () => {
+    vi.stubEnv("PAPERCLIP_PROJECT_ACCESS_MODE", "enforce");
+    const fixture = await seed();
+    const cloudSales = { ...fixture.salesOperator, source: "cloud_tenant" } as Express.Request["actor"];
+    const paths = (id: string) => [
+      `/api/agents/${id}/configuration`,
+      `/api/agents/${id}/config-revisions`,
+      `/api/agents/${id}/skills`,
+    ];
+
+    for (const actor of [fixture.salesOperator, cloudSales]) {
+      const client = request(app(actor));
+      const missing = paths(randomUUID());
+      for (const [index, path] of paths(fixture.deliveryBound.id).entries()) {
+        const res = await client.get(path);
+        const random = await client.get(missing[index]!);
+        expect(res.status, path).toBe(404);
+        expect(res.body, path).toEqual(random.body);
+      }
+      for (const path of paths(fixture.salesBound.id).slice(0, 2)) {
+        const res = await client.get(path);
+        expect(res.status, path).not.toBe(404);
+      }
+    }
+
+    const owner = await request(app(fixture.owner)).get(`/api/agents/${fixture.deliveryBound.id}/configuration`);
+    expect(owner.status, owner.text).toBe(200);
+  });
+
   it("drops a hidden agent's whole subtree from /org instead of re-parenting it", async () => {
     vi.stubEnv("PAPERCLIP_PROJECT_ACCESS_MODE", "enforce");
     const fixture = await seed();

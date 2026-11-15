@@ -1879,6 +1879,9 @@ export function agentRoutes(
     assertCompanyAccess(req, targetAgent.companyId);
     if (req.actor.type === "board") {
       await assertCanReadConfigurations(req, targetAgent.companyId);
+      if (projectAccessMode() !== "off" && isProjectVisibilityDenial(await decideAgentRead(req, targetAgent))) {
+        throw notFound("Agent not found");
+      }
       return;
     }
     if (!req.actor.agentId) throw forbidden("Agent authentication required");
