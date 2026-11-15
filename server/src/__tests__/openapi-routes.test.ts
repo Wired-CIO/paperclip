@@ -116,7 +116,11 @@ const HTTP_METHODS = new Set([
   "patch",
   "trace",
 ]);
-const explicitOpenApiCoverageExclusions = new Set<string>();
+const explicitOpenApiCoverageExclusions = new Set<string>([
+  // Inference relay: callers use a dedicated relay key, not a board session or agent
+  // API key, and the route answers 404 unless configured. Documented in doc/LLM-RELAY.md.
+  "llm-relay.ts",
+]);
 
 const explicitOpenApiOperationCoverageExclusions = new Set([
   // Exact Cloud-control signed action; ordinary board/agent credentials cannot invoke it.
