@@ -4,6 +4,7 @@ import { registerIdleMcpOwners } from "./services/public-mcp/idle-sleep-proof.js
 import { startMcpRevocationIndexSync } from "./services/public-mcp/revocation-index-sync.js";
 import { startMcpIngressHandoffExpiry } from "./services/public-mcp/ingress-handoff-expiry.js";
 import { nativeRunMcpRoutes } from "./routes/native-run-mcp.js";
+import { llmRelayRoutes } from "./routes/llm-relay.js";
 import { connectionEventWakeRoutes } from "./routes/connection-event-wake.js";
 import { registerGitHubReviewProjectionWork } from "./services/chat-channels/github/review-projection-work.js";
 import { finishServiceShutdown } from "./shutdown.js";
@@ -602,6 +603,9 @@ export async function createApp(
   // agent API key. Every request revalidates the active heartbeat row.
   app.use(runtimeConnectionIntentRoutes(db));
   app.use(nativeRunMcpRoutes());
+  // Inference relay for sandboxed agents: authenticates with its own relay key and
+  // answers 404 unless PAPERCLIP_LLM_RELAY_* is configured. See doc/LLM-RELAY.md.
+  app.use(llmRelayRoutes());
   const hostServicesDisposers = new Map<string, () => void>();
   let lifecyclePluginsReady = false;
   const agentLifecycle = startAgentLifecycle(db, createLifecycleDriver(db, workerManager), () => lifecyclePluginsReady && !isWarmStandby() && !isIdleTaskDrainActive());
