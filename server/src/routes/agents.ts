@@ -1250,6 +1250,9 @@ export function agentRoutes(
     });
   }
 
+  const agentListProjectVisibility = (req: Request, db: Db, companyId: string) =>
+    issueListProjectVisibility(req, db, companyId, { includeCloudTenant: true });
+
   async function assertAgentReadAllowed(req: Request, res: Response, agent: { id: string; companyId: string }) {
     const decision = await decideAgentRead(req, agent);
     if (decision.allowed) return true;
@@ -4040,7 +4043,7 @@ export function agentRoutes(
       });
       return;
     }
-    const projectVisibility = await issueListProjectVisibility(req, db, companyId);
+    const projectVisibility = await agentListProjectVisibility(req, db, companyId);
     const result = await filterAgentsForActor(req, await svc.list(companyId, { projectVisibility }));
     const canReadConfigs = await actorCanReadConfigurationsForCompany(req, companyId);
     if (canReadConfigs) {
@@ -4119,7 +4122,7 @@ export function agentRoutes(
     assertCompanyAccess(req, companyId);
     const tree = await filterAgentsForActor(
       req,
-      await svc.orgForCompany(companyId, { projectVisibility: await issueListProjectVisibility(req, db, companyId) }),
+      await svc.orgForCompany(companyId, { projectVisibility: await agentListProjectVisibility(req, db, companyId) }),
       companyId,
     );
     const leanTree = tree.map((node) => toLeanOrgNode(node as Record<string, unknown>));
@@ -4132,7 +4135,7 @@ export function agentRoutes(
     const style = (ORG_CHART_STYLES.includes(req.query.style as OrgChartStyle) ? req.query.style : "warmth") as OrgChartStyle;
     const tree = await filterAgentsForActor(
       req,
-      await svc.orgForCompany(companyId, { projectVisibility: await issueListProjectVisibility(req, db, companyId) }),
+      await svc.orgForCompany(companyId, { projectVisibility: await agentListProjectVisibility(req, db, companyId) }),
       companyId,
     );
     const leanTree = tree.map((node) => toLeanOrgNode(node as Record<string, unknown>));
@@ -4148,7 +4151,7 @@ export function agentRoutes(
     const style = (ORG_CHART_STYLES.includes(req.query.style as OrgChartStyle) ? req.query.style : "warmth") as OrgChartStyle;
     const tree = await filterAgentsForActor(
       req,
-      await svc.orgForCompany(companyId, { projectVisibility: await issueListProjectVisibility(req, db, companyId) }),
+      await svc.orgForCompany(companyId, { projectVisibility: await agentListProjectVisibility(req, db, companyId) }),
       companyId,
     );
     const leanTree = tree.map((node) => toLeanOrgNode(node as Record<string, unknown>));
@@ -4161,7 +4164,7 @@ export function agentRoutes(
   router.get("/companies/:companyId/agent-configurations", async (req, res) => {
     const companyId = req.params.companyId as string;
     await assertCanReadConfigurations(req, companyId);
-    const rows = await svc.list(companyId, { projectVisibility: await issueListProjectVisibility(req, db, companyId) });
+    const rows = await svc.list(companyId, { projectVisibility: await agentListProjectVisibility(req, db, companyId) });
     res.json(rows.map((row) => redactAgentConfiguration(row)));
   });
 

@@ -255,6 +255,32 @@ describeEmbeddedPostgres("agent routes honour project visibility", () => {
     expect(ownerRes.status, ownerRes.text).toBe(200);
   });
 
+  it("applies the same filtering to a cloud_tenant member as to a session operator", async () => {
+    vi.stubEnv("PAPERCLIP_PROJECT_ACCESS_MODE", "enforce");
+    const fixture = await seed();
+    const cloudSales = { ...fixture.salesOperator, source: "cloud_tenant" } as Express.Request["actor"];
+    const visibleNames = ALL_NAMES.filter((name) => !HIDDEN_FROM_SALES_LIST.includes(name));
+
+    expect(await listNames(cloudSales, fixture.companyId)).toEqual(visibleNames);
+
+    const configs = await request(app(cloudSales)).get(`/api/companies/${fixture.companyId}/agent-configurations`);
+    expect(configs.status, configs.text).toBe(200);
+    expect((configs.body as Array<{ name: string }>).map((agent) => agent.name).sort()).toEqual(visibleNames);
+
+    const org = await request(app(cloudSales)).get(`/api/companies/${fixture.companyId}/org`);
+    expect(org.status, org.text).toBe(200);
+    expect(flatten(org.body as OrgNode[])).toEqual(
+      ALL_NAMES.filter((name) => !HIDDEN_NAMES_IN_SALES_ORG.includes(name)),
+    );
+    const body = JSON.stringify(org.body);
+    for (const hidden of [fixture.deliveryBound, fixture.deliveryChild, fixture.deliveryGrandchild, fixture.deliveryLead]) {
+      expect(body).not.toContain(hidden.id);
+    }
+
+    const detail = await request(app(cloudSales)).get(`/api/agents/${fixture.deliveryBound.id}`);
+    expect(detail.status, detail.text).toBe(404);
+  });
+
   it("drops a hidden agent's whole subtree from /org instead of re-parenting it", async () => {
     vi.stubEnv("PAPERCLIP_PROJECT_ACCESS_MODE", "enforce");
     const fixture = await seed();
