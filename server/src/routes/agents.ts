@@ -141,7 +141,7 @@ import {
 import { badRequest, conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { ONBOARDING_FIRST_TASK_SKILL_KEY, PAPERCLIP_CORE_SKILL_KEYS } from "../services/company-skills.js";
 import { createRunSecretRedactionRegistry } from "../services/run-secret-redaction.js";
-import { agentBudgetPage, assertAuthenticated, assertBoard, assertCompanyAccess, COMPANY_BUDGETS_PAGE, assertInstanceAdmin, buildActorSecretContext, getAccessibleResource, getActorInfo, hasCompanyAccess, isProjectHiddenByProjectVisibility } from "./authz.js";
+import { agentBudgetPage, assertAuthenticated, assertBoard, assertCompanyAccess, COMPANY_BUDGETS_PAGE, assertInstanceAdmin, buildActorSecretContext, getAccessibleResource, getActorInfo, hasCompanyAccess, isProjectHiddenByProjectVisibility, isProjectVisibilityDenial, issueListProjectVisibility } from "./authz.js";
 import { projectAccessMode } from "../services/project-visibility.js";
 import { runAdapterLoginStartSpine } from "./adapter-login-route-spine.js";
 import { isLoginCommandSupportedAdapterType } from "../services/login-command.js";
@@ -1253,6 +1253,11 @@ export function agentRoutes(
   async function assertAgentReadAllowed(req: Request, res: Response, agent: { id: string; companyId: string }) {
     const decision = await decideAgentRead(req, agent);
     if (decision.allowed) return true;
+    // A project-hidden agent answers exactly like a missing one; a 403 would confirm it exists.
+    if (isProjectVisibilityDenial(decision)) {
+      res.status(404).json({ error: "Agent not found" });
+      return false;
+    }
     res.status(403).json({ error: "Agent is outside this actor's authorization boundary" });
     return false;
   }
@@ -4035,7 +4040,8 @@ export function agentRoutes(
       });
       return;
     }
-    const result = await filterAgentsForActor(req, await svc.list(companyId));
+    const projectVisibility = await issueListProjectVisibility(req, db, companyId);
+    const result = await filterAgentsForActor(req, await svc.list(companyId, { projectVisibility }));
     const canReadConfigs = await actorCanReadConfigurationsForCompany(req, companyId);
     if (canReadConfigs) {
       res.json(result.map((agent) => redactAgentRowForResponse(agent)));
@@ -4111,7 +4117,11 @@ export function agentRoutes(
   router.get("/companies/:companyId/org", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    const tree = await filterAgentsForActor(req, await svc.orgForCompany(companyId), companyId);
+    const tree = await filterAgentsForActor(
+      req,
+      await svc.orgForCompany(companyId, { projectVisibility: await issueListProjectVisibility(req, db, companyId) }),
+      companyId,
+    );
     const leanTree = tree.map((node) => toLeanOrgNode(node as Record<string, unknown>));
     res.json(leanTree);
   });
@@ -4120,7 +4130,11 @@ export function agentRoutes(
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     const style = (ORG_CHART_STYLES.includes(req.query.style as OrgChartStyle) ? req.query.style : "warmth") as OrgChartStyle;
-    const tree = await filterAgentsForActor(req, await svc.orgForCompany(companyId), companyId);
+    const tree = await filterAgentsForActor(
+      req,
+      await svc.orgForCompany(companyId, { projectVisibility: await issueListProjectVisibility(req, db, companyId) }),
+      companyId,
+    );
     const leanTree = tree.map((node) => toLeanOrgNode(node as Record<string, unknown>));
     const svg = renderOrgChartSvg(leanTree as unknown as OrgNode[], style);
     res.setHeader("Content-Type", "image/svg+xml");
@@ -4132,7 +4146,11 @@ export function agentRoutes(
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     const style = (ORG_CHART_STYLES.includes(req.query.style as OrgChartStyle) ? req.query.style : "warmth") as OrgChartStyle;
-    const tree = await filterAgentsForActor(req, await svc.orgForCompany(companyId), companyId);
+    const tree = await filterAgentsForActor(
+      req,
+      await svc.orgForCompany(companyId, { projectVisibility: await issueListProjectVisibility(req, db, companyId) }),
+      companyId,
+    );
     const leanTree = tree.map((node) => toLeanOrgNode(node as Record<string, unknown>));
     const png = await renderOrgChartPng(leanTree as unknown as OrgNode[], style);
     res.setHeader("Content-Type", "image/png");
@@ -4143,7 +4161,7 @@ export function agentRoutes(
   router.get("/companies/:companyId/agent-configurations", async (req, res) => {
     const companyId = req.params.companyId as string;
     await assertCanReadConfigurations(req, companyId);
-    const rows = await svc.list(companyId);
+    const rows = await svc.list(companyId, { projectVisibility: await issueListProjectVisibility(req, db, companyId) });
     res.json(rows.map((row) => redactAgentConfiguration(row)));
   });
 
