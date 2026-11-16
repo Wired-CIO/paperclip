@@ -1,7 +1,7 @@
 import { notifyAttentionRetentionWork } from "./retention-work-notifications.js";
 import { type BudgetServiceHooks } from "./budgets.js";
 
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, not } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, agentConfigRevisions, agentApiKeys, heartbeatRuns } from "@paperclipai/db";
 import { isUuidLike, normalizeAgentApiKeyScope, normalizeAgentUrlKey, type AgentApiKeyScope } from "@paperclipai/shared";
@@ -18,6 +18,7 @@ import {
   configPatchFromSnapshot,
 } from "../lib/agent-records.js";
 import { createAgentLifecycle } from "./agent-lifecycle.js";
+import { agentVisibilityPredicate, type ProjectVisibilityResolution } from "./project-visibility.js";
 
 export { hasAgentShortnameCollision, deduplicateAgentName } from "../lib/agent-records.js";
 
@@ -30,12 +31,26 @@ export function agentService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
   } = agentRecordQueries(db);
   const updateAgent = (...args: Parameters<ReturnType<typeof createAgentLifecycle>["updateConfiguration"]>) =>
     createAgentLifecycle(db, budgetHooks).updateConfiguration(...args);
+  // `undefined` or an unrestricted resolution hides nothing and makes no query.
+  const hiddenAgentIds = async (companyId: string, projectVisibility: ProjectVisibilityResolution | undefined) => {
+    if (!projectVisibility || projectVisibility.kind === "unrestricted") return null;
+    const hidden = await db
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.companyId, companyId), not(agentVisibilityPredicate(db, projectVisibility, companyId, agents.id))));
+    return new Set(hidden.map((row) => row.id));
+  };
   return {
-    list: async (companyId: string, options?: { includeTerminated?: boolean }) => {
-      const allCompanyRows = await listCompanyAgentRows(companyId);
-      const rows = options?.includeTerminated
-        ? allCompanyRows
-        : allCompanyRows.filter((row) => row.status !== "terminated");
+    list: async (
+      companyId: string,
+      options?: { includeTerminated?: boolean; projectVisibility?: ProjectVisibilityResolution },
+    ) => {
+      const [allCompanyRows, hidden] = await Promise.all([
+        listCompanyAgentRows(companyId),
+        hiddenAgentIds(companyId, options?.projectVisibility),
+      ]);
+      const rows = allCompanyRows.filter((row) =>
+        (options?.includeTerminated || row.status !== "terminated") && !hidden?.has(row.id));
       const hydrated = await hydrateAgentSpend(rows);
       return normalizeAgentRows(hydrated, allCompanyRows);
     },
@@ -206,8 +221,14 @@ export function agentService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
       return rows[0] ?? null;
     },
 
-    orgForCompany: async (companyId: string) => {
-      const allCompanyRows = await listCompanyAgentRows(companyId);
+    orgForCompany: async (
+      companyId: string,
+      options?: { projectVisibility?: ProjectVisibilityResolution },
+    ) => {
+      const [allCompanyRows, hidden] = await Promise.all([
+        listCompanyAgentRows(companyId),
+        hiddenAgentIds(companyId, options?.projectVisibility),
+      ]);
       const rows = allCompanyRows.filter((row) => row.status !== "terminated");
       const normalizedRows = normalizeAgentRows(rows, allCompanyRows);
       const byManager = new Map<string | null, typeof normalizedRows>();
@@ -219,7 +240,7 @@ export function agentService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
       }
 
       const build = (managerId: string | null): Array<Record<string, unknown>> => {
-        const members = byManager.get(managerId) ?? [];
+        const members = (byManager.get(managerId) ?? []).filter((member) => !hidden?.has(member.id));
         return members.map((member) => ({
           ...member,
           reports: build(member.id),

@@ -1149,18 +1149,25 @@ function createAuthorizationService(db: Db | DbTransaction, readSnapshot?: ReadA
     }
     if (resource.type === "agent") {
       if (!resource.agentId) return true;
-      const bindings = await db
-        .select({ projectId: projectBindings.projectId })
-        .from(projectBindings)
-        .where(
-          and(
-            eq(projectBindings.companyId, companyId),
-            eq(projectBindings.targetType, "agent"),
-            eq(projectBindings.targetId, resource.agentId),
+      const [bindings, ledProjects] = await Promise.all([
+        db
+          .select({ projectId: projectBindings.projectId })
+          .from(projectBindings)
+          .where(
+            and(
+              eq(projectBindings.companyId, companyId),
+              eq(projectBindings.targetType, "agent"),
+              eq(projectBindings.targetId, resource.agentId),
+            ),
           ),
-        );
-      // An agent with no binding is unrestricted; bindings only ever narrow.
-      return bindings.length === 0 || bindings.some((binding) => resolution.projectIds.has(binding.projectId));
+        db
+          .select({ projectId: projects.id })
+          .from(projects)
+          .where(and(eq(projects.companyId, companyId), eq(projects.leadAgentId, resource.agentId))),
+      ]);
+      // An agent with no binding and no led project is unrestricted; both only ever narrow.
+      const agentProjects = [...bindings, ...ledProjects];
+      return agentProjects.length === 0 || agentProjects.some((entry) => resolution.projectIds.has(entry.projectId));
     }
     return true;
   }

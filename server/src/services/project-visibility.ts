@@ -226,6 +226,51 @@ export function boundEntityPredicate(
 }
 
 /**
+ * SQL predicate for `agents.id`. An agent belongs to the projects it is bound
+ * to (`project_bindings`) plus the projects it leads (`projects.lead_agent_id`).
+ * With no such project it is unrestricted; otherwise it is visible only when at
+ * least one of them is visible. The point check in `authorization.ts`
+ * (`resourceWithinVisibleProjects`) must answer the same way.
+ */
+export function agentVisibilityPredicate(
+  db: Db,
+  resolution: ProjectVisibilityResolution,
+  companyId: string,
+  agentIdColumn: AnyPgColumn,
+): SQL {
+  if (resolution.kind === "unrestricted") return sql`true`;
+
+  const visibleProjectIds = [...resolution.projectIds];
+  const bindingFor = () =>
+    and(
+      eq(projectBindings.companyId, companyId),
+      eq(projectBindings.targetType, "agent" satisfies ProjectBindingTargetType),
+      eq(projectBindings.targetId, sql`${agentIdColumn}::text`),
+    )!;
+  const ledBy = () => and(eq(projects.companyId, companyId), eq(projects.leadAgentId, agentIdColumn))!;
+
+  const hasProject = or(
+    exists(db.select({ id: projectBindings.id }).from(projectBindings).where(bindingFor())),
+    exists(db.select({ id: projects.id }).from(projects).where(ledBy())),
+  )!;
+  if (visibleProjectIds.length === 0) return not(hasProject);
+
+  const boundToVisible = exists(
+    db
+      .select({ id: projectBindings.id })
+      .from(projectBindings)
+      .where(and(bindingFor(), inArray(projectBindings.projectId, visibleProjectIds))),
+  );
+  const leadsVisible = exists(
+    db
+      .select({ id: projects.id })
+      .from(projects)
+      .where(and(ledBy(), inArray(projects.id, visibleProjectIds))),
+  );
+  return or(not(hasProject), boundToVisible, leadsVisible)!;
+}
+
+/**
  * SQL predicate for `documents.id` covering every way a document inherits
  * (or escapes) project scoping:
  *  - explicit `project_bindings` row (freestanding documents)
