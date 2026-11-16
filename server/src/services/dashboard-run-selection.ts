@@ -1,13 +1,23 @@
 import type { Db } from "@paperclipai/db";
 import { heartbeatRuns } from "@paperclipai/db";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { agentVisibilityPredicate, type ProjectVisibilityResolution } from "./project-visibility.js";
 
 const MAX_CANDIDATES_PER_POOL = 1_000;
 const ACTIVE_STATUSES = ["queued", "running"];
 
 /** Select recent dashboard cards without ranking the company's full run history. */
-export async function selectDashboardRunIds(db: Db, companyId: string, limit: number): Promise<string[]> {
+export async function selectDashboardRunIds(
+  db: Db,
+  companyId: string,
+  limit: number,
+  projectVisibility?: ProjectVisibilityResolution,
+): Promise<string[]> {
   if (limit <= 0) return [];
+  const hiddenAgentFilter =
+    projectVisibility && projectVisibility.kind !== "unrestricted"
+      ? agentVisibilityPredicate(db, projectVisibility, companyId, heartbeatRuns.agentId)
+      : undefined;
 
   const columns = {
     id: heartbeatRuns.id,
@@ -18,12 +28,12 @@ export async function selectDashboardRunIds(db: Db, companyId: string, limit: nu
   const [activeRuns, recentRuns] = await Promise.all([
     db.select(columns)
       .from(heartbeatRuns)
-      .where(and(eq(heartbeatRuns.companyId, companyId), inArray(heartbeatRuns.status, ACTIVE_STATUSES)))
+      .where(and(eq(heartbeatRuns.companyId, companyId), inArray(heartbeatRuns.status, ACTIVE_STATUSES), hiddenAgentFilter))
       .orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id))
       .limit(MAX_CANDIDATES_PER_POOL),
     db.select(columns)
       .from(heartbeatRuns)
-      .where(eq(heartbeatRuns.companyId, companyId))
+      .where(and(eq(heartbeatRuns.companyId, companyId), hiddenAgentFilter))
       .orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id))
       .limit(MAX_CANDIDATES_PER_POOL),
   ]);

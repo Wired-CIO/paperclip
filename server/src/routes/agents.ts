@@ -142,7 +142,7 @@ import { badRequest, conflict, forbidden, HttpError, notFound, unprocessable } f
 import { ONBOARDING_FIRST_TASK_SKILL_KEY, PAPERCLIP_CORE_SKILL_KEYS } from "../services/company-skills.js";
 import { createRunSecretRedactionRegistry } from "../services/run-secret-redaction.js";
 import { agentBudgetPage, assertAuthenticated, assertBoard, assertCompanyAccess, COMPANY_BUDGETS_PAGE, assertInstanceAdmin, buildActorSecretContext, getAccessibleResource, getActorInfo, hasCompanyAccess, isProjectHiddenByProjectVisibility, isProjectVisibilityDenial, issueListProjectVisibility } from "./authz.js";
-import { projectAccessMode } from "../services/project-visibility.js";
+import { agentVisibilityPredicate, projectAccessMode } from "../services/project-visibility.js";
 import { runAdapterLoginStartSpine } from "./adapter-login-route-spine.js";
 import { isLoginCommandSupportedAdapterType } from "../services/login-command.js";
 import {
@@ -7169,7 +7169,8 @@ export function agentRoutes(
       ? Math.max(1, Math.min(HEARTBEAT_RUN_LIST_MAX_LIMIT, parseInt(limitParam, 10) || HEARTBEAT_RUN_LIST_DEFAULT_LIMIT))
       : HEARTBEAT_RUN_LIST_DEFAULT_LIMIT;
     const summary = req.query.summary === "true" || req.query.summary === "1";
-    const recentRuns = await heartbeat.list(companyId, agentId, limit, { summary });
+    const projectVisibility = await agentListProjectVisibility(req, db, companyId);
+    const recentRuns = await heartbeat.list(companyId, agentId, limit, { summary, projectVisibility });
     const runs = req.query.latestFailuresOnly === "true" ? latestFailedRunsByAgent(recentRuns) : recentRuns;
     const readDecisions = await getHeartbeatRunReadDecisions(db, access, req.actor, runs);
     res.json(await runRedactions.redactForRuns(companyId, runs.map((run, index) =>
@@ -7219,6 +7220,11 @@ export function agentRoutes(
     const minCount = readLiveRunsQueryInt(req.query.minCount, 50, 0);
     const limit = readLiveRunsQueryInt(req.query.limit, 50, 50);
     const distinctTasks = req.query.distinctTasks === "true";
+    const projectVisibility = await agentListProjectVisibility(req, db, companyId);
+    const hiddenAgentFilter =
+      projectVisibility && projectVisibility.kind !== "unrestricted"
+        ? agentVisibilityPredicate(db, projectVisibility, companyId, heartbeatRuns.agentId)
+        : undefined;
 
     const columns = {
       id: heartbeatRuns.id,
@@ -7268,6 +7274,7 @@ export function agentRoutes(
         and(
           eq(heartbeatRuns.companyId, companyId),
           inArray(heartbeatRuns.status, ["queued", "running"]),
+          hiddenAgentFilter,
         ),
       )
       .orderBy(desc(heartbeatRuns.createdAt));
@@ -7279,7 +7286,7 @@ export function agentRoutes(
     if (distinctTasks) {
       // Return enough representatives for the dashboard to count cards beyond
       // its visible four, rather than stopping at the minimum display count.
-      const selectedIds = await selectDashboardRunIds(db, companyId, limit);
+      const selectedIds = await selectDashboardRunIds(db, companyId, limit, projectVisibility);
       const selectedRows = selectedIds.length === 0 ? [] : await db
         .select(columns)
         .from(heartbeatRuns)
@@ -7301,6 +7308,7 @@ export function agentRoutes(
             eq(heartbeatRuns.companyId, companyId),
             not(inArray(heartbeatRuns.status, ["queued", "running"])),
             ...(activeIds.length > 0 ? [not(inArray(heartbeatRuns.id, activeIds))] : []),
+            hiddenAgentFilter,
           ),
         )
         .orderBy(desc(heartbeatRuns.createdAt))

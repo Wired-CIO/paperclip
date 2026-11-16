@@ -57,6 +57,7 @@ import {
 import { isUuidLike } from "@paperclipai/shared";
 import { HEARTBEAT_RUN_LIST_DEFAULT_LIMIT, HEARTBEAT_RUN_LIST_MAX_LIMIT } from "@paperclipai/shared";
 import { isUnsafeSessionWorkspaceCwd } from "../session-workspace-cwd.js";
+import { agentVisibilityPredicate, type ProjectVisibilityResolution } from "../project-visibility.js";
 
 export const EXECUTION_REVIEW_PARTICIPANT_RECOVERY_WAKE_REASON =
   "execution_review_participant_recovery";
@@ -1797,9 +1798,13 @@ export function createHeartbeatRunState(db: Db) {
       companyId: string,
       agentId?: string,
       limit?: number,
-      options: { summary?: boolean } = {},
+      options: { summary?: boolean; projectVisibility?: ProjectVisibilityResolution } = {},
     ) => {
       const safeForLegacyEncoding = await hasUnsafeTextProjectionDatabase();
+      const hiddenAgentFilter =
+        options.projectVisibility && options.projectVisibility.kind !== "unrestricted"
+          ? agentVisibilityPredicate(db, options.projectVisibility, companyId, heartbeatRuns.agentId)
+          : undefined;
       const summary = options.summary === true;
       const rows = await retryIdempotentDatabaseOperation(async () => {
         const query = db
@@ -1824,12 +1829,11 @@ export function createHeartbeatRunState(db: Db) {
           .from(heartbeatRuns)
           .leftJoin(heartbeatRunListContextRecord, sql`true`)
           .where(
-            agentId
-              ? and(
-                  eq(heartbeatRuns.companyId, companyId),
-                  eq(heartbeatRuns.agentId, agentId),
-                )
-              : eq(heartbeatRuns.companyId, companyId),
+            and(
+              eq(heartbeatRuns.companyId, companyId),
+              agentId ? eq(heartbeatRuns.agentId, agentId) : undefined,
+              hiddenAgentFilter,
+            ),
           )
           .orderBy(desc(heartbeatRuns.createdAt));
 
