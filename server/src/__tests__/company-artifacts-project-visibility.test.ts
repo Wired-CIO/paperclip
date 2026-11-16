@@ -5,13 +5,16 @@ import request from "supertest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   agents,
+  assets,
   companies,
   companyMemberships,
   createDb,
   documentRevisions,
   documents,
+  issueAttachments,
   issueDocuments,
   issues,
+  issueWorkProducts,
   principalPermissionGrants,
   projectCategories,
   projects,
@@ -44,6 +47,9 @@ describeEmbeddedPostgres("artifacts under project visibility (WIR-1272)", () => 
 
   afterEach(async () => {
     vi.unstubAllEnvs();
+    await db.delete(issueWorkProducts);
+    await db.delete(issueAttachments);
+    await db.delete(assets);
     await db.delete(issueDocuments);
     await db.delete(documentRevisions);
     await db.delete(documents);
@@ -229,6 +235,51 @@ describeEmbeddedPostgres("artifacts under project visibility (WIR-1272)", () => 
     const { ids } = await listAll(fixture.salesOperator, fixture.companyId, 50);
 
     expect(ids).toHaveLength(PER_BUCKET * 3);
+  });
+
+  it("applies the same predicate to work-product and attachment artifacts, with q and starred in play", async () => {
+    const fixture = await seed();
+    const [agent] = await db.select({ id: agents.id }).from(agents);
+    for (const bucket of ["sales", "delivery", "unbound"] as const) {
+      const issue = fixture.issueByBucket[bucket];
+      const [asset] = await db.insert(assets).values({
+        companyId: fixture.companyId,
+        provider: "local_disk",
+        objectKey: `${bucket}-render.mp4`,
+        contentType: "video/mp4",
+        byteSize: 10,
+        sha256: `sha256-${bucket}`,
+        originalFilename: `${bucket}-render.mp4`,
+        createdByAgentId: agent!.id,
+      }).returning();
+      await db.insert(issueAttachments).values({ companyId: fixture.companyId, issueId: issue.id, assetId: asset!.id });
+      await db.insert(issueWorkProducts).values({
+        companyId: fixture.companyId,
+        projectId: issue.projectId,
+        issueId: issue.id,
+        type: "artifact",
+        provider: "paperclip",
+        title: `${bucket} work product`,
+        status: "ready_for_review",
+      });
+    }
+
+    const sources = async (actor: Express.Request["actor"], extra = "") => {
+      const res = await request(app(actor))
+        .get(`/api/companies/${fixture.companyId}/artifacts?limit=100${extra}`)
+        .expect(200);
+      return res.body.artifacts.map((artifact: { id: string; title: string }) => artifact.title).sort();
+    };
+
+    const operator = await sources(fixture.salesOperator);
+    expect(operator.filter((title: string) => title.startsWith("delivery"))).toEqual([]);
+    expect(operator).toEqual(expect.arrayContaining([
+      "sales work product", "unbound work product", "sales-render.mp4", "unbound-render.mp4",
+    ]));
+    expect(await sources(fixture.salesOperator, "&q=delivery")).toEqual([]);
+    expect(await sources(fixture.owner, "&q=delivery")).toEqual(
+      expect.arrayContaining(["delivery work product", "delivery-render.mp4"]),
+    );
   });
 
   it("does not name a hidden root issue as a parent_task group title", async () => {
