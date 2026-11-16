@@ -71,6 +71,7 @@ export async function assertAiConnectionCreateAccess(
     const [grant] = await db
       .select({
         owner: connectionGrants.subjectUserId,
+        kind: connectionGrants.kind,
         creator: toolConnections.createdByUserId,
       })
       .from(connectionGrants)
@@ -86,7 +87,13 @@ export async function assertAiConnectionCreateAccess(
         ),
       )
       .limit(1);
-    if (!grant || (grant.owner ?? grant.creator) !== userId)
+    // A personal account is reconnected by its owner. A company-shared account
+    // (organization grant) is reconnected by any connection manager, so the
+    // person who created it is not the only one who can restore it.
+    const owns = !!grant && (grant.owner ?? grant.creator) === userId;
+    const managesShared =
+      !!grant && grant.kind === "organization" && (await canManageAiConnections(db, req, companyId));
+    if (!grant || !(owns || managesShared))
       throw forbidden(
         "Only the account owner can reconnect this AI connection",
       );

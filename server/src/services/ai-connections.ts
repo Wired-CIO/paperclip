@@ -650,6 +650,10 @@ export function aiConnectionService(db: Db) {
       throw notFound("AI connection not found");
     if (
       reconnect &&
+      // A connection manager may reconnect a company-shared (organization)
+      // account they did not create. The management context proves the caller
+      // passed the connections:configure check; personal accounts stay owner-only.
+      !(reconnect.grant.kind === "organization" && managementContext) &&
       (reconnect.grant.createdByUserId !== userId ||
         (reconnect.grant.kind === "user" &&
           reconnect.grant.subjectUserId !== userId))

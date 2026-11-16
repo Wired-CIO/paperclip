@@ -2697,6 +2697,22 @@ console.log(JSON.stringify({ type: "result", subtype: "success", result: "hello"
     await expect(assertAiConnectionCreateAccess(db, actorFor("create-guard-member", "member"), companyId, sharedIntent)).rejects.toThrow(/connection manager/i);
     await expect(assertAiConnectionCreateAccess(db, actorFor("create-guard-admin", "admin"), companyId, sharedIntent)).resolves.toBe("create-guard-admin");
   });
+  it("lets a connection manager reconnect a company-shared account they did not create, but not a personal one", async () => {
+    const actorFor = (userId: string, membershipRole: string) => ({
+      actor: { type: "board", source: "session", userId, companyIds: [companyId], memberships: [{ companyId, membershipRole, status: "active" }] },
+    }) as express.Request;
+    await db.insert(companyMemberships).values([
+      { companyId, principalType: "user", principalId: "reconnect-member", status: "active", membershipRole: "member" },
+      { companyId, principalType: "user", principalId: "reconnect-admin", status: "active", membershipRole: "admin" },
+    ]);
+    const shared = await service.save(companyId, "alice", { provider: "anthropic", method: "api_key", ownership: "shared", name: "Shared reconnect", apiKey: "fixture", agentIds: [], allAgents: true }, "fixture-shared-reconnect");
+    await db.update(connectionGrants).set({ kind: "organization", subjectUserId: null }).where(eq(connectionGrants.id, shared.grantId));
+    const intent = { ownership: "shared" as const, allAgents: true, agentIds: [], connectionId: shared.connectionId };
+    await expect(assertAiConnectionCreateAccess(db, actorFor("reconnect-admin", "admin"), companyId, intent)).resolves.toBe("reconnect-admin");
+    await expect(assertAiConnectionCreateAccess(db, actorFor("reconnect-member", "member"), companyId, intent)).rejects.toThrow(/account owner/i);
+    const personal = await create("alice", "Personal reconnect");
+    await expect(assertAiConnectionCreateAccess(db, actorFor("reconnect-admin", "admin"), companyId, { ...intent, connectionId: personal.connectionId })).rejects.toThrow(/account owner/i);
+  });
   it("permits new-agent shared installation only for a connection configurator, without bypassing audience", async () => {
     const account = await service.save(companyId, "alice", { provider: "anthropic", method: "api_key", ownership: "shared", name: "Restricted shared", apiKey: "fixture", agentIds: [], allAgents: false }, "fixture-restricted");
     const selected = { provider: "anthropic", method: "api_key", mode: "shared", ...account } as const;
