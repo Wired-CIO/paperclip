@@ -238,6 +238,43 @@ describeEmbeddedPostgres("heartbeat-runs and live-runs honour project visibility
     expect(agentIdsOf(res.body)).toEqual([fixture.salesBound.id, fixture.mixedBound.id].sort());
   });
 
+  it("heartbeat-runs latestFailuresOnly never surfaces a hidden agent's failed run", async () => {
+    vi.stubEnv("PAPERCLIP_PROJECT_ACCESS_MODE", "enforce");
+    const fixture = await seed();
+    await db.insert(heartbeatRuns).values([
+      { companyId: fixture.companyId, agentId: fixture.deliveryBound.id, status: "failed", createdAt: new Date("2026-04-11T10:00:00.000Z") },
+      { companyId: fixture.companyId, agentId: fixture.salesBound.id, status: "failed", createdAt: new Date("2026-04-11T09:00:00.000Z") },
+    ]);
+
+    const path = `/api/companies/${fixture.companyId}/heartbeat-runs?latestFailuresOnly=true&summary=true&limit=200`;
+    const operator = await request(app(fixture.salesOperator)).get(path);
+    expect(operator.status, operator.text).toBe(200);
+    expect(agentIdsOf(operator.body)).toEqual([fixture.salesBound.id]);
+    expect(operator.text).not.toContain(fixture.deliveryBound.id);
+
+    const owner = await request(app(fixture.owner)).get(path);
+    expect(agentIdsOf(owner.body)).toEqual([fixture.deliveryBound.id, fixture.salesBound.id].sort());
+  });
+
+  it("heartbeat-runs returns an empty 200 for a restricted operator whose grant sees no project", async () => {
+    vi.stubEnv("PAPERCLIP_PROJECT_ACCESS_MODE", "enforce");
+    const fixture = await seed();
+    const userId = `user-${randomUUID()}`;
+    await db.insert(companyMemberships).values({
+      companyId: fixture.companyId, principalType: "user", principalId: userId, status: "active", membershipRole: "operator",
+    });
+    await db.insert(principalPermissionGrants).values({
+      companyId: fixture.companyId, principalType: "user", principalId: userId,
+      permissionKey: "projects:access", scope: { projectIds: [randomUUID()] }, grantedByUserId: null,
+    });
+
+    const res = await request(app(actorFor(fixture.companyId, userId, "operator")))
+      .get(`/api/companies/${fixture.companyId}/heartbeat-runs?limit=100`);
+    expect(res.status, res.text).toBe(200);
+    // Only the unbound agent is visible: bound and led agents all belong to projects this grant cannot see.
+    expect(agentIdsOf(res.body)).toEqual([fixture.unbound.id]);
+  });
+
   it("heartbeat-runs filtered by a hidden agent id is an empty 200, not a 403 or its runs", async () => {
     vi.stubEnv("PAPERCLIP_PROJECT_ACCESS_MODE", "enforce");
     const fixture = await seed();

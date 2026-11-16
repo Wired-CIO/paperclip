@@ -8793,7 +8793,8 @@ export function issueRoutes(
           loadFailures: async () => {
             const permission = await access.decide({ actor: req.actor, action: "company_scope:read", resource: { type: "company", companyId } });
             if (!permission.allowed) throw new HttpError(403, "Run telemetry is outside this actor's authorization boundary");
-            const runs = latestFailedRunsByAgent(await heartbeat.list(companyId, undefined, 200, { summary: true }));
+            const projectVisibility = await issueListProjectVisibility(req, db, companyId, { includeCloudTenant: true });
+            const runs = latestFailedRunsByAgent(await heartbeat.list(companyId, undefined, 200, { summary: true, projectVisibility }));
             const decisions = await getHeartbeatRunReadDecisions(db, access, req.actor, runs);
             return runRedactions.redactForRuns(companyId, runs.map((run, index) => decisions[index] ? run : redactHeartbeatRunListRow(run)), getActorInfo(req).actorId);
           },

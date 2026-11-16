@@ -3,7 +3,7 @@ import express from "express";
 import request from "supertest";
 import { eq } from "drizzle-orm";
 import { expect, it, vi } from "vitest";
-import { agents, authUsers, companyMemberships, heartbeatRuns, issueInboxArchives, issues } from "@paperclipai/db";
+import { agents, authUsers, companyMemberships, heartbeatRuns, issueInboxArchives, issues, principalPermissionGrants, projectBindings, projectCategories, projects } from "@paperclipai/db";
 import { INBOX_MINE_ISSUE_STATUS_FILTER, type CompactIssue, type InboxMineSnapshot } from "@paperclipai/shared";
 import { actorMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/error-handler.js";
@@ -297,6 +297,50 @@ describeEmbeddedPostgres("Mine inbox snapshot routes", () => {
       release();
       await aborted;
       await Promise.allSettled(requests);
+    }
+  });
+  it("omits a project-hidden agent's failed run from the inbox snapshot, matching heartbeat-runs", async () => {
+    vi.stubEnv("PAPERCLIP_PROJECT_ACCESS_MODE", "enforce");
+    try {
+      const f = await seed("Inbox run visibility");
+      const [sales] = await ctx.db.insert(projectCategories).values({ companyId: f.companyId, name: "Sales" }).returning();
+      const [delivery] = await ctx.db.insert(projectCategories).values({ companyId: f.companyId, name: "Delivery" }).returning();
+      const [salesProject] = await ctx.db.insert(projects).values({ companyId: f.companyId, name: "Sales project", categoryId: sales!.id }).returning();
+      const [deliveryProject] = await ctx.db.insert(projects).values({ companyId: f.companyId, name: "Delivery project", categoryId: delivery!.id }).returning();
+      const [visibleAgent, hiddenAgent] = await Promise.all([addAgent(f.companyId), addAgent(f.companyId)]);
+      await ctx.db.insert(projectBindings).values([
+        { companyId: f.companyId, projectId: salesProject!.id, targetType: "agent", targetId: visibleAgent.id, createdByUserId: "tester" },
+        { companyId: f.companyId, projectId: deliveryProject!.id, targetType: "agent", targetId: hiddenAgent.id, createdByUserId: "tester" },
+      ]);
+      const operatorId = `user-${randomUUID()}`;
+      await ctx.db.insert(companyMemberships).values({
+        companyId: f.companyId, principalType: "user", principalId: operatorId, status: "active", membershipRole: "operator",
+      });
+      await ctx.db.insert(principalPermissionGrants).values({
+        companyId: f.companyId, principalType: "user", principalId: operatorId,
+        permissionKey: "projects:access", scope: { categoryIds: [sales!.id] }, grantedByUserId: null,
+      });
+      await ctx.db.insert(heartbeatRuns).values([
+        { companyId: f.companyId, agentId: visibleAgent.id, status: "failed", createdAt: new Date("2026-11-01T00:00:01Z") },
+        { companyId: f.companyId, agentId: hiddenAgent.id, status: "failed", createdAt: new Date("2026-11-01T00:00:02Z") },
+      ]);
+      const operator = {
+        type: "board", userId: operatorId, source: "session", isInstanceAdmin: false,
+        companyIds: [f.companyId], memberships: [{ companyId: f.companyId, status: "active", membershipRole: "operator" }],
+      } as Express.Request["actor"];
+      const owner = {
+        type: "board", userId: f.userId, source: "session", isInstanceAdmin: false,
+        companyIds: [f.companyId], memberships: [{ companyId: f.companyId, status: "active", membershipRole: "owner" }],
+      } as Express.Request["actor"];
+
+      const failureAgentIds = async (actor: Express.Request["actor"]) => {
+        const snapshot = (await request(appFor(null, {}, actor)).get(`/api/companies/${f.companyId}/inbox/mine`).expect(200)).body as InboxMineSnapshot;
+        return (snapshot.failureRuns as Array<{ agentId: string }>).map((run) => run.agentId).sort();
+      };
+      expect(await failureAgentIds(operator)).toEqual([visibleAgent.id]);
+      expect(await failureAgentIds(owner)).toEqual([visibleAgent.id, hiddenAgent.id].sort());
+    } finally {
+      vi.unstubAllEnvs();
     }
   });
 });
