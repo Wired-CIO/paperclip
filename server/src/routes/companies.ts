@@ -4,7 +4,7 @@ import multer from "multer";
 import { and, count as countFn, eq } from "drizzle-orm";
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
-import { agents as agentsTable } from "@paperclipai/db";
+import { agents as agentsTable, issues as issuesTable } from "@paperclipai/db";
 import type { CompanyPortabilityImportResult } from "@paperclipai/shared";
 import {
   MAX_ZIP_ENTRY_DECOMPRESSED_BYTES,
@@ -67,6 +67,7 @@ import {
   workTimelineService,
 } from "../services/index.js";
 import { isCloudManagedInstance } from "../services/cloud-instance.js";
+import { projectColumnPredicate } from "../services/project-visibility.js";
 import { getHiddenSettings } from "../services/settings-visibility.js";
 import type { StorageService } from "../storage/types.js";
 import {
@@ -77,6 +78,7 @@ import {
   getActorInfo,
   hasCompanyAccess,
   hasCompanyOwnerOrAdminMembership,
+  issueListProjectVisibility,
 } from "./authz.js";
 import { COMPANY_IMPORT_ROUTE_PATH } from "./company-import-paths.js";
 
@@ -441,7 +443,9 @@ export function companyRoutes(db: Db, storage?: StorageService, options?: Compan
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     const query = companyArtifactsQuerySchema.parse(req.query);
+    const projectVisibility = await issueListProjectVisibility(req, db, companyId);
     res.json(await artifacts.list(companyId, query, {
+      issueConditions: projectVisibility ? [projectColumnPredicate(projectVisibility, issuesTable.projectId)] : undefined,
       userId: query.starred && req.actor.type === "board" ? req.actor.userId : undefined,
     }));
   });
