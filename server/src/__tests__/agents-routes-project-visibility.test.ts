@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { and, eq } from "drizzle-orm";
 import express from "express";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -18,10 +19,14 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { agentRoutes } from "../routes/agents.js";
+import { renderOrgChartPng } from "../routes/org-chart-svg.js";
 import { agentService } from "../services/agents.js";
 import { UNRESTRICTED_PROJECT_VISIBILITY } from "../services/project-visibility.js";
 
 /**
+ * WIR-1212 (T9c): org.svg and org.png render the same dropped-subtree org as
+ * /org, without error, and the owner's rendered bytes do not move.
+ *
  * WIR-1210 (T9a): under `enforce` a Sales-only operator gets the same 404 for a
  * Delivery-bound (or Delivery-leading) agent's detail that a random id gets, the
  * agent is omitted from the list and /org, and the whole subtree below a hidden
@@ -329,23 +334,122 @@ describeEmbeddedPostgres("agent routes honour project visibility", () => {
     }
   });
 
+  async function fetchBinary(actor: Express.Request["actor"], path: string) {
+    return request(app(actor))
+      .get(path)
+      .buffer(true)
+      .parse((response, done) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => { chunks.push(chunk); });
+        response.on("end", () => done(null, Buffer.concat(chunks)));
+      });
+  }
+
+  const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
   it("renders org.svg for a Sales-only operator without the hidden subtree", async () => {
     vi.stubEnv("PAPERCLIP_PROJECT_ACCESS_MODE", "enforce");
     const fixture = await seed();
 
-    const res = await request(app(fixture.salesOperator))
-      .get(`/api/companies/${fixture.companyId}/org.svg`)
-      .buffer(true)
-      .parse((response, done) => {
-        let data = "";
-        response.setEncoding("utf8");
-        response.on("data", (chunk: string) => { data += chunk; });
-        response.on("end", () => done(null, data));
-      });
+    const res = await fetchBinary(fixture.salesOperator, `/api/companies/${fixture.companyId}/org.svg`);
     expect(res.status).toBe(200);
-    const svg = String(res.body);
-    for (const name of HIDDEN_NAMES_IN_SALES_ORG) expect(svg).not.toContain(name);
-    expect(svg).toContain("SalesBound");
+    expect(res.headers["content-type"]).toContain("image/svg+xml");
+    const svg = (res.body as Buffer).toString("utf8");
+    for (const hidden of HIDDEN_NAMES_IN_SALES_ORG) expect(svg).not.toContain(hidden);
+    for (const visible of ALL_NAMES.filter((name) => !HIDDEN_NAMES_IN_SALES_ORG.includes(name))) {
+      expect(svg).toContain(visible);
+    }
+  });
+
+  it("renders org.png for a Sales-only operator from the same tree /org returns, not the owner's", async () => {
+    vi.stubEnv("PAPERCLIP_PROJECT_ACCESS_MODE", "enforce");
+    const fixture = await seed();
+    const path = `/api/companies/${fixture.companyId}/org.png`;
+
+    const res = await fetchBinary(fixture.salesOperator, path);
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toContain("image/png");
+    const png = res.body as Buffer;
+    expect(png.subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true);
+
+    // The image is a pure function of the tree, so equality with a render of the
+    // visible /org tree proves no hidden node reached the renderer.
+    const org = await request(app(fixture.salesOperator)).get(`/api/companies/${fixture.companyId}/org`);
+    expect(org.status, org.text).toBe(200);
+    expect(png.equals(await renderOrgChartPng(org.body))).toBe(true);
+
+    const owner = await fetchBinary(fixture.owner, path);
+    expect(owner.status).toBe(200);
+    expect(png.equals(owner.body as Buffer)).toBe(false);
+  });
+
+  it("renders org.svg and org.png without error when every agent is hidden", async () => {
+    vi.stubEnv("PAPERCLIP_PROJECT_ACCESS_MODE", "enforce");
+    const fixture = await seed();
+    const [deliveryProject] = await db.select({ id: projects.id }).from(projects)
+      .where(and(eq(projects.companyId, fixture.companyId), eq(projects.name, "Delivery project")));
+    await db.insert(projectBindings).values({
+      companyId: fixture.companyId,
+      projectId: deliveryProject!.id,
+      targetType: "agent",
+      targetId: fixture.boss.id,
+      createdByUserId: "tester",
+    });
+
+    const org = await request(app(fixture.salesOperator)).get(`/api/companies/${fixture.companyId}/org`);
+    expect(org.status, org.text).toBe(200);
+    expect(org.body).toEqual([]);
+
+    const svg = await fetchBinary(fixture.salesOperator, `/api/companies/${fixture.companyId}/org.svg`);
+    expect(svg.status).toBe(200);
+    for (const name of ALL_NAMES) expect((svg.body as Buffer).toString("utf8")).not.toContain(name);
+
+    const png = await fetchBinary(fixture.salesOperator, `/api/companies/${fixture.companyId}/org.png`);
+    expect(png.status).toBe(200);
+    expect((png.body as Buffer).subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true);
+    expect((png.body as Buffer).equals(await renderOrgChartPng([]))).toBe(true);
+
+    const ownerSvg = await fetchBinary(fixture.owner, `/api/companies/${fixture.companyId}/org.svg`);
+    for (const name of ALL_NAMES) expect((ownerSvg.body as Buffer).toString("utf8")).toContain(name);
+  });
+
+  it("keeps the owner's org.svg and org.png byte-identical to the baseline with the mode off", async () => {
+    const fixture = await seed();
+    const svgPath = `/api/companies/${fixture.companyId}/org.svg`;
+    const pngPath = `/api/companies/${fixture.companyId}/org.png`;
+
+    vi.stubEnv("PAPERCLIP_PROJECT_ACCESS_MODE", "off");
+    const baselineSvg = await fetchBinary(fixture.owner, svgPath);
+    const baselinePng = await fetchBinary(fixture.owner, pngPath);
+    expect(baselineSvg.status).toBe(200);
+    expect(baselinePng.status).toBe(200);
+    for (const name of ALL_NAMES) expect((baselineSvg.body as Buffer).toString("utf8")).toContain(name);
+
+    for (const mode of ["shadow", "enforce"]) {
+      vi.stubEnv("PAPERCLIP_PROJECT_ACCESS_MODE", mode);
+      const svg = await fetchBinary(fixture.owner, svgPath);
+      const png = await fetchBinary(fixture.owner, pngPath);
+      expect(svg.status, mode).toBe(200);
+      expect(png.status, mode).toBe(200);
+      expect((svg.body as Buffer).equals(baselineSvg.body as Buffer), mode).toBe(true);
+      expect((png.body as Buffer).equals(baselinePng.body as Buffer), mode).toBe(true);
+    }
+  });
+
+  it("renders the full org.svg and org.png for a Sales-only operator under off and shadow", async () => {
+    const fixture = await seed();
+    const svgPath = `/api/companies/${fixture.companyId}/org.svg`;
+    const pngPath = `/api/companies/${fixture.companyId}/org.png`;
+
+    vi.stubEnv("PAPERCLIP_PROJECT_ACCESS_MODE", "off");
+    const ownerSvg = (await fetchBinary(fixture.owner, svgPath)).body as Buffer;
+    const ownerPng = (await fetchBinary(fixture.owner, pngPath)).body as Buffer;
+
+    for (const mode of ["off", "shadow"]) {
+      vi.stubEnv("PAPERCLIP_PROJECT_ACCESS_MODE", mode);
+      expect(((await fetchBinary(fixture.salesOperator, svgPath)).body as Buffer).equals(ownerSvg), mode).toBe(true);
+      expect(((await fetchBinary(fixture.salesOperator, pngPath)).body as Buffer).equals(ownerPng), mode).toBe(true);
+    }
   });
 
   it("keeps the owner's /org identical to the baseline with the mode off", async () => {
