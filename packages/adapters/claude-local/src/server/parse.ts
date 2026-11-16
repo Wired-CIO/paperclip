@@ -260,10 +260,16 @@ export function detectClaudeLoginRequired(input: {
   const parsed = input.parsed ?? null;
   const resultText = asString(parsed?.result, "").trim();
 
-  // The legacy login-prompt markers keep their broad scope. They match against
-  // every output line, which includes the parsed result, the parsed errors, and
-  // the raw stdout and stderr.
-  const promptLines = [resultText, ...extractClaudeErrorMessages(parsed ?? {}), input.stdout, input.stderr]
+  // The legacy login-prompt markers match the parsed result, the parsed errors
+  // and stderr. They match raw stdout only when the CLI never produced a
+  // terminal result (it died before it could report), because the stream on
+  // stdout carries every tool result the model saw. A Dataverse or Business
+  // Central agent routinely reads "401 Unauthorized" or "authentication
+  // required" from a tool; once a terminal result exists, that text says
+  // nothing about the Claude login. Treating it as a login failure marked the
+  // agent's AI connection "sign in again" after an unrelated max-turns run.
+  const rawStdout = parsed === null ? input.stdout : "";
+  const promptLines = [resultText, ...extractClaudeErrorMessages(parsed ?? {}), rawStdout, input.stderr]
     .join("\n")
     .split(/\r?\n/)
     .map((line) => line.trim())

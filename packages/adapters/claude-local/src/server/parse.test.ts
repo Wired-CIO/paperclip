@@ -14,6 +14,32 @@ import {
 } from "./parse.js";
 
 describe("detectClaudeLoginRequired", () => {
+  it("ignores login-like words in tool output once the run produced a terminal result", () => {
+    // A max-turns run whose tool results contained "401 Unauthorized" must not be
+    // reported as a lost Claude login: it would mark the agent's AI connection
+    // "sign in again" although the credential is fine.
+    const toolOutput =
+      '{"type":"user","message":{"content":[{"type":"tool_result","content":"HTTP 401 Unauthorized: authentication required"}]}}';
+    expect(
+      detectClaudeLoginRequired({
+        parsed: {
+          type: "result",
+          subtype: "error_max_turns",
+          is_error: true,
+          result: "Reached maximum number of turns (80)",
+        },
+        stdout: toolOutput,
+        stderr: "",
+      }).requiresLogin,
+    ).toBe(false);
+  });
+
+  it("still scans raw stdout when the CLI never produced a result", () => {
+    expect(
+      detectClaudeLoginRequired({ parsed: null, stdout: "Not logged in", stderr: "" }).requiresLogin,
+    ).toBe(true);
+  });
+
   it("classifies Claude's invalid API key login prompt as auth required", () => {
     expect(
       detectClaudeLoginRequired({
