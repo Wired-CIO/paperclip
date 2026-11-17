@@ -2683,6 +2683,40 @@ describe("TaskChatComposer", () => {
   });
 });
 
+describe("composer session reset", () => {
+  it("offers an accessible new-session action that sends the existing /new command", async () => {
+    const onAdd = vi.fn().mockResolvedValue(undefined);
+    render(<TaskChatComposer onAdd={onAdd} conversationMode workMode="standard" />);
+
+    const newSession = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "New session",
+    )!;
+    expect(newSession.getAttribute("title")).toBe(
+      "Start fresh context here, preserving conversation history",
+    );
+
+    await act(async () => newSession.click());
+
+    expect(onAdd).toHaveBeenCalledWith(
+      "/new",
+      undefined,
+      undefined,
+      undefined,
+      expect.any(String),
+    );
+  });
+
+  it("does not show the new-session action outside agent conversations", () => {
+    render(<TaskChatComposer onAdd={vi.fn()} workMode="standard" />);
+
+    expect(
+      Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent === "New session",
+      ),
+    ).toBeUndefined();
+  });
+});
+
 describe("composer Stop", () => {
   function stopButton() { return container.querySelector<HTMLButtonElement>('[data-testid="task-chat-composer-stop"]'); }
 

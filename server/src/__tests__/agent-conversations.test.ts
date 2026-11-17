@@ -959,6 +959,14 @@ describe("conversation execution wake policy", () => {
 });
 
 describe("chat prompt policy", () => {
+  it("keeps self-contained chat turns on the supplied wake fast path", () => {
+    expect(AGENT_CHAT_DIRECTIVE).toContain("Keep chat turns context-efficient");
+    expect(AGENT_CHAT_DIRECTIVE).toContain("without calling task-context, task-history");
+    expect(AGENT_CHAT_DIRECTIVE).toContain("read that exact document once");
+    expect(AGENT_CHAT_DIRECTIVE).toContain("do not inspect attachments");
+    expect(AGENT_CHAT_DIRECTIVE).toContain("one non-mutating probe per named system");
+  });
+
   it("preserves explicit plan approval while avoiding ritual confirmations for ordinary chat", () => {
     expect(AGENT_CHAT_DIRECTIVE).toContain("When the user asks to approve a plan before handoff");
     expect(AGENT_CHAT_DIRECTIVE).toContain('interactionKind: "confirmation"');
