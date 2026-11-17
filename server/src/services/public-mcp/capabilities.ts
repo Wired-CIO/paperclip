@@ -4,7 +4,7 @@ import { inject } from "light-my-request";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { type Db, mcpMutationReceipts } from "@paperclipai/db";
-import { ISSUE_STATUSES } from "@paperclipai/shared";
+import { ISSUE_PRIORITIES, ISSUE_STATUSES } from "@paperclipai/shared";
 import { errorHandler } from "../../middleware/error-handler.js";
 import { DEFAULT_JSON_BODY_LIMIT } from "../../http/body-limits.js";
 import { logActivity } from "../activity-log.js";
@@ -60,6 +60,14 @@ export function createMcpApiDispatch(api: Router, parentLocals?: Record<string, 
   };
 }
 
+/** A board user id, or "me" for the connected person. Resolved here so the API never sees a client-chosen alias. */
+const personRef = z.union([z.literal("me"), z.string().regex(/^[A-Za-z0-9_-]{1,128}$/)]);
+function resolvePerson(p: McpPrincipal, ref: unknown) {
+  if (ref !== "me") return String(ref);
+  if (!p.actor.userId) throw new McpCapabilityError("This connection has no person to resolve \"me\" to.");
+  return p.actor.userId;
+}
+
 export const publicMcpCapabilities: Capability[] = [
   {
     name: "paperclip_connection", description: "Identify the connected person, explicitly authorized company and permissions. This connection acts as the person; assigning a task never impersonates its agent.",
@@ -81,13 +89,24 @@ export const publicMcpCapabilities: Capability[] = [
     run: async (p, a, api) => ({ projects: rows(await api(p, "GET", `/companies/${a.companyId}/projects`)).map((v) => pick(v, ["id", "name", "description", "status"])) }),
   },
   {
-    name: "paperclip_search_tasks", description: "Find durable tasks by title or human-readable identifier and read their current status, including work delegated in earlier conversations. Use each returned task's id as taskId in subsequent tools. Search here when the user names a task; do not guess a UUID or ask the user for one before searching.",
-    schema: z.object({ ...company, query: z.string().max(300).optional(), status: z.enum(ISSUE_STATUSES).optional(), assigneeAgentId: z.uuid().optional(), limit: boundedLimit, offset: z.number().int().min(0).default(0) }).strict(),
+    name: "paperclip_search_tasks", description: "Find durable tasks by title or human-readable identifier and read their current status, including work delegated in earlier conversations. Use each returned task's id as taskId in subsequent tools. Search here when the user names a task; do not guess a UUID or ask the user for one before searching. For analysis, filter by one or more statuses, project, parent, label, agent or person assignee (\"me\" is the connected person) and updatedSince, sort by updated or created, and page with offset until fewer than limit tasks return.",
+    schema: z.object({
+      ...company, query: z.string().max(300).optional(),
+      status: z.union([z.enum(ISSUE_STATUSES), z.array(z.enum(ISSUE_STATUSES)).min(1).max(ISSUE_STATUSES.length)]).optional(),
+      assigneeAgentId: z.uuid().optional(), assigneeUserId: personRef.optional(),
+      projectId: z.uuid().optional(), parentId: z.uuid().optional(), labelId: z.uuid().optional(),
+      updatedSince: z.iso.datetime({ offset: true }).optional(),
+      sortField: z.enum(["updated", "created"]).optional(), sortDir: z.enum(["asc", "desc"]).optional(),
+      limit: boundedLimit, offset: z.number().int().min(0).default(0),
+    }).strict(),
     run: async (p, a, api) => {
       const query = new URLSearchParams({ limit: String(a.limit), offset: String(a.offset) });
       if (a.query) query.set("q", String(a.query));
-      if (a.status) query.set("status", String(a.status));
-      if (a.assigneeAgentId) query.set("assigneeAgentId", String(a.assigneeAgentId));
+      if (a.status) query.set("status", (Array.isArray(a.status) ? a.status : [a.status]).join(","));
+      if (a.assigneeUserId) query.set("assigneeUserId", resolvePerson(p, a.assigneeUserId));
+      for (const key of ["assigneeAgentId", "projectId", "parentId", "labelId", "updatedSince", "sortField", "sortDir"] as const) {
+        if (a[key]) query.set(key, String(a[key]));
+      }
       return { tasks: rows(await api(p, "GET", `/companies/${a.companyId}/issues?${query}`)).map((v) => pick(v, taskFields)), limit: a.limit, offset: a.offset };
     },
   },
@@ -106,12 +125,21 @@ export const publicMcpCapabilities: Capability[] = [
   },
   {
     name: "paperclip_create_task", write: true,
-    description: "Delegate work by creating one durable task assigned to a Paperclip agent. This may schedule autonomous execution and consume the company's configured model budget. Normal permissions, approval gates and agent availability apply. Returns immediately; retrieve progress later. Never retry with a new requestId after an uncertain result.",
-    schema: z.object({ ...company, requestId, title: z.string().trim().min(1).max(200), description: z.string().max(50000), assigneeAgentId: z.uuid(), projectId: z.uuid().optional() }).strict(),
+    description: "Create one durable task. Assign it to a Paperclip agent to delegate work, to a person (\"me\" is the connected person), or to nobody to leave it in the backlog; never both an agent and a person. An agent assignment may schedule autonomous execution and consume the company's configured model budget. Status defaults to todo when assigned and backlog when not. Normal permissions, approval gates and agent availability apply. Returns immediately; retrieve progress later. Never retry with a new requestId after an uncertain result.",
+    schema: z.object({
+      ...company, requestId, title: z.string().trim().min(1).max(200), description: z.string().max(50000),
+      assigneeAgentId: z.uuid().optional(), assigneeUserId: personRef.optional(),
+      projectId: z.uuid().optional(), parentId: z.uuid().optional(),
+      priority: z.enum(ISSUE_PRIORITIES).optional(), status: z.enum(["backlog", "todo"]).optional(),
+    }).strict().refine((v) => !(v.assigneeAgentId && v.assigneeUserId), "Assign the task to an agent or a person, not both."),
     run: async (p, a, api, origin) => {
+      const assigned = Boolean(a.assigneeAgentId || a.assigneeUserId);
       const result = await api(p, "POST", `/companies/${a.companyId}/issues`, {
-        title: a.title, description: a.description, assigneeAgentId: a.assigneeAgentId,
-        ...(a.projectId ? { projectId: a.projectId } : {}), status: "todo",
+        title: a.title, description: a.description,
+        ...(a.assigneeAgentId ? { assigneeAgentId: a.assigneeAgentId } : {}),
+        ...(a.assigneeUserId ? { assigneeUserId: resolvePerson(p, a.assigneeUserId) } : {}),
+        ...(a.projectId ? { projectId: a.projectId } : {}), ...(a.parentId ? { parentId: a.parentId } : {}),
+        ...(a.priority ? { priority: a.priority } : {}), status: a.status ?? (assigned ? "todo" : "backlog"),
         idempotencyKey: `mcp:${hashMcpSecret(p.grant.companyId + ":" + p.grant.userId)}:${a.requestId}`,
       });
       return { task: pick(result, taskFields), url: origin + "/" + pathId(p.company.issuePrefix) + "/issues/" + pathId(object(result).identifier ?? object(result).id),

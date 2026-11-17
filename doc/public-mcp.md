@@ -242,9 +242,9 @@ OAuth credential bodies and redirect locations are redacted from HTTP logs.
 | `paperclip_connection` | Person, company, scopes, connection management link |
 | `paperclip_list_agents` | Safe agent summary and availability |
 | `paperclip_list_projects` | Safe project summary |
-| `paperclip_search_tasks` | Bounded task search with offset pagination |
+| `paperclip_search_tasks` | Bounded task search with offset pagination; filters by status (one or many), project, parent, label, agent or person assignee (`me`), `updatedSince`, and sort order for analysis |
 | `paperclip_read_task` | Current task plus recent comments/history |
-| `paperclip_create_task` | Assigned task, submitted to existing scheduling |
+| `paperclip_create_task` | Task assigned to an agent (submitted to existing scheduling), to a person (`me` allowed), or unassigned in the backlog; optional priority and parent |
 | `paperclip_add_comment` | Human feedback; may wake or queue work |
 | `paperclip_list_deliverables` | Documents, attachments and work-product references |
 | `paperclip_read_document` | Durable document body and current revision |
