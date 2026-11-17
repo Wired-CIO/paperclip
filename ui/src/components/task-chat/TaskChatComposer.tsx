@@ -844,15 +844,19 @@ export function TaskChatComposer({
 
   const canResetPausedConversation = conversationMode && !queuedEdit && body.trim() === "/new" && attachments.length === 0;
 
-  async function submit() {
-    if (disabled || (pause && !canResetPausedConversation)) return;
+  function startNewSession() {
+    void submit(true);
+  }
+
+  async function submit(newSession = false) {
+    if (disabled || (pause && !newSession && !canResetPausedConversation)) return;
     const retained =
       draftKey && !queuedEdit ? loadDraftSubmission(draftKey) : null;
     if (retained && !submitting) {
       setUncertainSubmission(retained);
       return;
     }
-    const submittedBody = bodyRef.current;
+    const submittedBody = newSession ? "/new" : bodyRef.current;
     const submittedAttachments = attachmentsRef.current;
     const submittedAssignee = pendingAssigneeRef.current;
     const trimmed = submittedBody.trim();
@@ -1434,6 +1438,26 @@ export function TaskChatComposer({
                   <Plus className="h-4 w-4" aria-hidden />
                 </button>
               </>
+            ) : null}
+
+            {conversationMode && !queuedEdit ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="h-8 shrink-0 px-2.5 text-xs"
+                onClick={startNewSession}
+                disabled={
+                  disabled ||
+                  submitting ||
+                  !!uncertainSubmission ||
+                  attachments.length > 0 ||
+                  body.trim().length > 0
+                }
+                title="Start fresh context here, preserving conversation history"
+              >
+                New session
+              </Button>
             ) : null}
 
             {queuedEdit ? (
