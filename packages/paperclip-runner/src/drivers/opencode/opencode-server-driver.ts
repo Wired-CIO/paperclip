@@ -529,6 +529,8 @@ class OpenCodeHarnessSession implements HarnessSession {
   readonly #outputLimitedMessageIds = new Set<string>();
   readonly #workspaceChangesByTurn = new Map<string, Record<string, unknown>>();
   #reportedSseCompaction = false;
+  /** Context-overflow errors OpenCode recovered from by compacting, per turn. */
+  readonly #contextOverflowRecoveries = new Map<string, number>();
   readonly #emittedFileReferences = new Set<string>();
   readonly #pendingRuntimeRequests = new Map<
     string,
@@ -2004,6 +2006,33 @@ class OpenCodeHarnessSession implements HarnessSession {
         this.#activeTurnId = null;
         return;
       }
+      // OpenCode reports a provider context overflow as session.error and then
+      // compacts the session and continues the same turn (auto-compaction is on
+      // by default). Failing the turn here would end a session that is about to
+      // recover. Record it as a compaction notice instead; a turn that keeps
+      // overflowing after compaction still fails below.
+      if (text(providerError.name) === "ContextOverflowError") {
+        const recoveries = (this.#contextOverflowRecoveries.get(turnId) ?? 0) + 1;
+        this.#contextOverflowRecoveries.set(turnId, recoveries);
+        if (recoveries <= MAX_CONTEXT_OVERFLOW_RECOVERIES_PER_TURN) {
+          const noticeId = `${turnId}:compaction:overflow:${recoveries}`;
+          this.#emit(
+            "provider.notice.recorded",
+            {
+              schema: "paperclip.provider.notice.v1",
+              noticeId,
+              severity: "info",
+              category: "context_compaction",
+              scope: "turn",
+              recoverable: true,
+              userActionable: false,
+              summary: "Context limit reached; compacting the conversation and continuing.",
+            },
+            { turnId, itemId: noticeId },
+          );
+          return;
+        }
+      }
       // OpenCode's provider errors (`APIError`) carry the message under `data`.
       const providerMessage = redact(
         text(providerError.message, text(providerErrorData.message, "OpenCode session failed.")),
@@ -2366,6 +2395,81 @@ class OpenCodeHarnessSession implements HarnessSession {
   }
 }
 
+/** Overflow errors tolerated per turn while OpenCode compacts; past this the turn fails. */
+const MAX_CONTEXT_OVERFLOW_RECOVERIES_PER_TURN = 2;
+/** Fraction of the context window held back so OpenCode compacts at 90% use. */
+const OPENCODE_COMPACTION_RESERVE = 0.1;
+const OPENCODE_MAX_OUTPUT_TOKENS = 32_000;
+const MIN_DISCOVERED_CONTEXT_WINDOW = 4_096;
+const MAX_DISCOVERED_CONTEXT_WINDOW = 10_000_000;
+
+/**
+ * Read a model's context window from an OpenAI-compatible `/models` listing.
+ * vLLM reports `max_model_len`; OpenRouter and others use `context_length`.
+ */
+export function parseModelContextWindow(body: unknown, model: string): number | undefined {
+  const entries = Array.isArray((body as { data?: unknown })?.data) ? (body as { data: unknown[] }).data : [];
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as Record<string, unknown>;
+    if (record.id !== model) continue;
+    for (const field of ["max_model_len", "context_length", "context_window", "max_context_length"]) {
+      const value = record[field];
+      if (typeof value === "number" && Number.isInteger(value)
+        && value >= MIN_DISCOVERED_CONTEXT_WINDOW && value <= MAX_DISCOVERED_CONTEXT_WINDOW) return value;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Without `limit.context` OpenCode never auto-compacts and a long session
+ * fails at the provider's hard limit. With it, OpenCode compacts once usage
+ * reaches `limit.input - compaction.reserved`, which is 90% here. Output is
+ * capped at the same reserve so a request made just under the threshold
+ * still fits the window.
+ */
+export function openCodeContextSettings(contextWindow: number) {
+  const reserved = Math.ceil(contextWindow * OPENCODE_COMPACTION_RESERVE);
+  return {
+    limit: { context: contextWindow, input: contextWindow, output: Math.min(OPENCODE_MAX_OUTPUT_TOKENS, reserved) },
+    compaction: { auto: true, prune: true, reserved },
+  };
+}
+
+/** Bounded, best-effort discovery; any failure leaves OpenCode's defaults in place. */
+async function discoverProviderContextWindow(
+  baseUrl: string, key: string, model: string, agent: HttpAgent | HttpsAgent,
+): Promise<number | undefined> {
+  const modelsUrl = new URL(`${baseUrl.replace(/\/+$/, "")}/models`);
+  try {
+    const body = await new Promise<string>((resolve, reject) => {
+      const outgoing = (modelsUrl.protocol === "https:" ? requestHttps : requestHttp)(modelsUrl, {
+        method: "GET",
+        agent,
+        headers: { Accept: "application/json", ...(key ? { Authorization: `Bearer ${key}` } : {}) },
+        signal: AbortSignal.timeout(5_000),
+      }, (response) => {
+        if ((response.statusCode ?? 0) !== 200) { response.resume(); reject(new Error("models listing unavailable")); return; }
+        const chunks: Buffer[] = [];
+        let bytes = 0;
+        response.on("data", (chunk: Buffer) => {
+          bytes += chunk.length;
+          if (bytes > 4 * 1024 * 1024) { response.destroy(); reject(new Error("models listing too large")); return; }
+          chunks.push(chunk);
+        });
+        response.once("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+        response.once("error", reject);
+      });
+      outgoing.once("error", reject);
+      outgoing.end();
+    });
+    return parseModelContextWindow(JSON.parse(body), model);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Retain the reusable gateway key in the runner; the harness gets a session-scoped capability. */
 async function startOpenCodeProviderProxy(baseUrl: string, key: string, model: string, environment: NodeJS.ProcessEnv) {
   const upstreamUrl = new URL(`${baseUrl.replace(/\/+$/, "")}/chat/completions`);
@@ -2387,6 +2491,9 @@ async function startOpenCodeProviderProxy(baseUrl: string, key: string, model: s
     }
   }
   const agent = upstreamUrl.protocol === "https:" ? new HttpsAgent({ proxyEnv, ca }) : new HttpAgent({ proxyEnv });
+  // OpenCode's bundled catalog already carries OpenRouter limits; only a
+  // Paperclip-routed endpoint (vLLM relay, custom gateway) is unknown to it.
+  const contextWindow = isOpenRouterUrl(baseUrl) ? undefined : await discoverProviderContextWindow(baseUrl, key, model, agent);
   const controllers = new Set<AbortController>();
   const server = createHttpServer((request, response) => {
     const controller = new AbortController();
@@ -2463,6 +2570,7 @@ async function startOpenCodeProviderProxy(baseUrl: string, key: string, model: s
   return {
     baseURL: `http://127.0.0.1:${address.port}/v1`,
     token,
+    contextWindow,
     close: async () => {
       for (const controller of controllers) controller.abort();
       agent.destroy();
@@ -2591,9 +2699,11 @@ async function startRuntime(input: {
       input.options.onDiagnostic?.(redact(`OpenCode executable cleanup failed: ${String(error)}`, sensitiveValues));
     }
   };
+  const contextSettings = providerProxy?.contextWindow ? openCodeContextSettings(providerProxy.contextWindow) : undefined;
   try {
     const config = {
       $schema: "https://opencode.ai/config.json",
+      ...(contextSettings ? { compaction: contextSettings.compaction } : {}),
       model: input.options.model,
       small_model: input.options.model,
       share: "disabled",
@@ -2621,6 +2731,7 @@ async function startRuntime(input: {
           models: {
             [providerModelId]: {
               name: providerModelId,
+              ...(contextSettings ? { limit: contextSettings.limit } : {}),
               ...(modelProvider === "openrouter"
                 ? { variants: {
                     "paperclip-default": {},

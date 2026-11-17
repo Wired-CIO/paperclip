@@ -35,7 +35,9 @@ import { localIntegrityBoundaryGolden } from "../../../test-support/local-integr
 import type { PrpEvent } from "../../protocol/replay-contract.js";
 import {
   OpenCodeServerDriver,
+  openCodeContextSettings,
   openCodeServerDriverInternals,
+  parseModelContextWindow,
 } from "./opencode-server-driver.js";
 
 const upstreamTransport = vi.hoisted(() => ({ endpoint: "", urls: [] as string[] }));
@@ -1070,7 +1072,11 @@ describe("OpenCodeServerDriver", () => {
     const outgoingProxy = createHttpServer((request, response) => {
       requests.push(request.url!);
       request.resume();
-      response.writeHead(200, { "content-type": "application/json" }).end('{"choices":[]}');
+      // Session start reads the model's context window through the same proxy.
+      const body = request.url!.endsWith("/models")
+        ? JSON.stringify({ data: [{ id: "team/model-alias", max_model_len: 65_536 }] })
+        : '{"choices":[]}';
+      response.writeHead(200, { "content-type": "application/json" }).end(body);
     });
     await new Promise<void>(resolve => outgoingProxy.listen(0, "127.0.0.1", resolve));
     const address = outgoingProxy.address();
@@ -1090,21 +1096,27 @@ describe("OpenCodeServerDriver", () => {
       });
       const session = await driver.openSession({ runId: sessionId, normalizedSessionId: sessionId, workingDirectory: root });
       const config = JSON.parse(await readFile(join(root, sessionId, "config", "opencode", "opencode.json"), "utf8"));
-      return { session, url: `${config.provider.paperclip.options.baseURL}/chat/completions`, headers: { Authorization: `Bearer ${config.provider.paperclip.options.apiKey}`, "Content-Type": "application/json" } };
+      return { session, config, url: `${config.provider.paperclip.options.baseURL}/chat/completions`, headers: { Authorization: `Bearer ${config.provider.paperclip.options.apiKey}`, "Content-Type": "application/json" } };
     };
     try {
       const proxied = await headersAndUrl("proxied", "");
       try {
+        // The discovered window becomes OpenCode's model limit with a 10% compaction reserve.
+        expect(proxied.config.provider.paperclip.models["team/model-alias"].limit).toEqual({ context: 65_536, input: 65_536, output: 6_554 });
+        expect(proxied.config.compaction).toEqual({ auto: true, prune: true, reserved: 6_554 });
         const response = await fetch(proxied.url, { method: "POST", headers: proxied.headers, body: JSON.stringify({ model: "team/model-alias", messages: [] }) });
         expect(response.status).toBe(200);
         expect(await response.json()).toEqual({ choices: [] });
-        expect(requests).toEqual(["http://gateway.invalid/v1/chat/completions"]);
+        expect(requests).toEqual(["http://gateway.invalid/v1/models", "http://gateway.invalid/v1/chat/completions"]);
       } finally { await proxied.session.close({ reason: "test" }); }
       const bypassed = await headersAndUrl("bypassed", "gateway.invalid");
       try {
+        // Discovery failed (the bypassed host does not resolve), so OpenCode keeps its defaults.
+        expect(bypassed.config.provider.paperclip.models["team/model-alias"].limit).toBeUndefined();
+        expect(bypassed.config.compaction).toBeUndefined();
         const response = await fetch(bypassed.url, { method: "POST", headers: bypassed.headers, body: JSON.stringify({ model: "team/model-alias", messages: [] }) });
         expect(response.status).toBe(502);
-        expect(requests).toHaveLength(1);
+        expect(requests).toHaveLength(2);
       } finally { await bypassed.session.close({ reason: "test" }); }
     } finally {
       await new Promise<void>(resolve => { outgoingProxy.close(() => resolve()); outgoingProxy.closeAllConnections(); });
@@ -3107,6 +3119,79 @@ describe("OpenCodeServerDriver", () => {
       expect((failure?.payload.error as Record<string, unknown>).message).toBeUndefined();
       expect(observed.find(event => event.eventType === "provider.notice.recorded")?.payload.summary).toBe("Provider is busy.");
       expect(JSON.stringify(failure)).not.toContain("private-body");
+    } finally { await session.close({ reason: "test complete" }); }
+  });
+
+  it("reads a model's context window from an OpenAI-compatible models listing", () => {
+    const listing = { data: [
+      { id: "other", max_model_len: 8_192 },
+      { id: "qwen3.8-27b", object: "model", max_model_len: 131_072 },
+      { id: "routed", context_length: 200_000 },
+      { id: "tiny", max_model_len: 512 },
+      { id: "text", max_model_len: "131072" },
+    ] };
+    expect(parseModelContextWindow(listing, "qwen3.8-27b")).toBe(131_072);
+    expect(parseModelContextWindow(listing, "routed")).toBe(200_000);
+    expect(parseModelContextWindow(listing, "tiny")).toBeUndefined();
+    expect(parseModelContextWindow(listing, "text")).toBeUndefined();
+    expect(parseModelContextWindow(listing, "missing")).toBeUndefined();
+    expect(parseModelContextWindow({ error: "nope" }, "qwen3.8-27b")).toBeUndefined();
+  });
+
+  it("sets limits so OpenCode compacts at 90% and a request under that still fits", () => {
+    const { limit, compaction } = openCodeContextSettings(131_072);
+    expect(compaction).toEqual({ auto: true, prune: true, reserved: 13_108 });
+    expect(limit).toEqual({ context: 131_072, input: 131_072, output: 13_108 });
+    // OpenCode compacts once usage reaches limit.input - reserved.
+    expect((limit.input - compaction.reserved) / limit.context).toBeCloseTo(0.9, 3);
+    // Output never exceeds the reserve, so prompt + max_tokens stays within the window.
+    expect(limit.input - compaction.reserved + limit.output).toBeLessThanOrEqual(limit.context);
+    expect(openCodeContextSettings(1_000_000).limit.output).toBe(32_000);
+  });
+
+  // The turn that survives an overflow is ended by a later, unrelated provider
+  // error: failing on *that* error proves the overflow left the turn running.
+  it.each([
+    { name: "keeps the turn running while OpenCode compacts after a context overflow", overflows: 1, failure: "APIError" },
+    { name: "fails a turn that keeps overflowing after compaction", overflows: 3, failure: "ContextOverflowError" },
+  ])("$name", async ({ overflows, failure }) => {
+    await chmod(fixture, 0o755);
+    const root = await mkdtemp(join(tmpdir(), "paperclip-opencode-overflow-"));
+    const workspace = await mkdtemp(join(tmpdir(), "paperclip-opencode-overflow-workspace-"));
+    roots.push(root, workspace);
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+    let streamOpened!: () => void;
+    const opened = new Promise<void>(resolve => { streamOpened = resolve; });
+    const driver = new OpenCodeServerDriver({
+      model: "openrouter/deepseek/deepseek-v4-flash-0731", runtimeDirectory: root, command: fixture,
+      environment: { PATH: process.env.PATH, OPENROUTER_API_KEY: "fixture-key" },
+      fetch: async (input, init) => String(input).endsWith("/event")
+        ? new Response(new ReadableStream<Uint8Array>({ start(controller) { stream = controller; streamOpened(); } }), { headers: { "Content-Type": "text/event-stream" } })
+        : fetch(input, init),
+    });
+    const session = await driver.openSession({ runId: `overflow-${overflows}`, normalizedSessionId: `overflow-${overflows}`, workingDirectory: workspace });
+    const send = (event: Record<string, unknown>) => stream.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+    try {
+      const events = collectTurnEvents(session.events());
+      await session.startTurn({ message: { role: "user", text: "long task" } });
+      await opened;
+      // Each frame carries its own id, as OpenCode's do; identical frames are deduplicated.
+      for (let index = 0; index < overflows; index += 1) {
+        send({ type: "session.error", id: `overflow-${index}`, properties: { sessionID: session.ids().providerSessionId, error: {
+          name: "ContextOverflowError", data: { message: "This model's maximum context length is 131072 tokens." } } } });
+      }
+      if (failure === "APIError") {
+        send({ type: "session.error", id: "later-error", properties: { sessionID: session.ids().providerSessionId, error: {
+          name: "APIError", data: { message: "Provider is busy.", statusCode: 503 } } } });
+      }
+      const observed = await events;
+      const notices = observed.filter(event => event.eventType === "provider.notice.recorded"
+        && event.payload.category === "context_compaction");
+      expect(notices).toHaveLength(Math.min(overflows, 2));
+      expect(notices[0]?.payload).toMatchObject({ severity: "info", recoverable: true, userActionable: false });
+      const failed = observed.filter(event => event.eventType === "turn.failed");
+      expect(failed).toHaveLength(1);
+      expect((failed[0]?.payload.error as Record<string, unknown>).name).toBe(failure);
     } finally { await session.close({ reason: "test complete" }); }
   });
 
