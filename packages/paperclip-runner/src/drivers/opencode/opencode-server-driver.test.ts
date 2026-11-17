@@ -1072,7 +1072,11 @@ describe("OpenCodeServerDriver", () => {
     const outgoingProxy = createHttpServer((request, response) => {
       requests.push(request.url!);
       request.resume();
-      response.writeHead(200, { "content-type": "application/json" }).end('{"choices":[]}');
+      // Session start reads the model's context window through the same proxy.
+      const body = request.url!.endsWith("/models")
+        ? JSON.stringify({ data: [{ id: "team/model-alias", max_model_len: 65_536 }] })
+        : '{"choices":[]}';
+      response.writeHead(200, { "content-type": "application/json" }).end(body);
     });
     await new Promise<void>(resolve => outgoingProxy.listen(0, "127.0.0.1", resolve));
     const address = outgoingProxy.address();
@@ -1092,21 +1096,27 @@ describe("OpenCodeServerDriver", () => {
       });
       const session = await driver.openSession({ runId: sessionId, normalizedSessionId: sessionId, workingDirectory: root });
       const config = JSON.parse(await readFile(join(root, sessionId, "config", "opencode", "opencode.json"), "utf8"));
-      return { session, url: `${config.provider.paperclip.options.baseURL}/chat/completions`, headers: { Authorization: `Bearer ${config.provider.paperclip.options.apiKey}`, "Content-Type": "application/json" } };
+      return { session, config, url: `${config.provider.paperclip.options.baseURL}/chat/completions`, headers: { Authorization: `Bearer ${config.provider.paperclip.options.apiKey}`, "Content-Type": "application/json" } };
     };
     try {
       const proxied = await headersAndUrl("proxied", "");
       try {
+        // The discovered window becomes OpenCode's model limit with a 10% compaction reserve.
+        expect(proxied.config.provider.paperclip.models["team/model-alias"].limit).toEqual({ context: 65_536, input: 65_536, output: 6_554 });
+        expect(proxied.config.compaction).toEqual({ auto: true, prune: true, reserved: 6_554 });
         const response = await fetch(proxied.url, { method: "POST", headers: proxied.headers, body: JSON.stringify({ model: "team/model-alias", messages: [] }) });
         expect(response.status).toBe(200);
         expect(await response.json()).toEqual({ choices: [] });
-        expect(requests).toEqual(["http://gateway.invalid/v1/chat/completions"]);
+        expect(requests).toEqual(["http://gateway.invalid/v1/models", "http://gateway.invalid/v1/chat/completions"]);
       } finally { await proxied.session.close({ reason: "test" }); }
       const bypassed = await headersAndUrl("bypassed", "gateway.invalid");
       try {
+        // Discovery failed (the bypassed host does not resolve), so OpenCode keeps its defaults.
+        expect(bypassed.config.provider.paperclip.models["team/model-alias"].limit).toBeUndefined();
+        expect(bypassed.config.compaction).toBeUndefined();
         const response = await fetch(bypassed.url, { method: "POST", headers: bypassed.headers, body: JSON.stringify({ model: "team/model-alias", messages: [] }) });
         expect(response.status).toBe(502);
-        expect(requests).toHaveLength(1);
+        expect(requests).toHaveLength(2);
       } finally { await bypassed.session.close({ reason: "test" }); }
     } finally {
       await new Promise<void>(resolve => { outgoingProxy.close(() => resolve()); outgoingProxy.closeAllConnections(); });
@@ -3139,10 +3149,12 @@ describe("OpenCodeServerDriver", () => {
     expect(openCodeContextSettings(1_000_000).limit.output).toBe(32_000);
   });
 
+  // The turn that survives an overflow is ended by a later, unrelated provider
+  // error: failing on *that* error proves the overflow left the turn running.
   it.each([
-    { name: "keeps the turn running while OpenCode compacts after a context overflow", overflows: 1, failed: false },
-    { name: "fails a turn that keeps overflowing after compaction", overflows: 3, failed: true },
-  ])("$name", async ({ overflows, failed }) => {
+    { name: "keeps the turn running while OpenCode compacts after a context overflow", overflows: 1, failure: "APIError" },
+    { name: "fails a turn that keeps overflowing after compaction", overflows: 3, failure: "ContextOverflowError" },
+  ])("$name", async ({ overflows, failure }) => {
     await chmod(fixture, 0o755);
     const root = await mkdtemp(join(tmpdir(), "paperclip-opencode-overflow-"));
     const workspace = await mkdtemp(join(tmpdir(), "paperclip-opencode-overflow-workspace-"));
@@ -3163,17 +3175,23 @@ describe("OpenCodeServerDriver", () => {
       const events = collectTurnEvents(session.events());
       await session.startTurn({ message: { role: "user", text: "long task" } });
       await opened;
+      // Each frame carries its own id, as OpenCode's do; identical frames are deduplicated.
       for (let index = 0; index < overflows; index += 1) {
-        send({ type: "session.error", properties: { sessionID: session.ids().providerSessionId, error: {
+        send({ type: "session.error", id: `overflow-${index}`, properties: { sessionID: session.ids().providerSessionId, error: {
           name: "ContextOverflowError", data: { message: "This model's maximum context length is 131072 tokens." } } } });
       }
-      if (!failed) send({ type: "session.idle", properties: { sessionID: session.ids().providerSessionId } });
+      if (failure === "APIError") {
+        send({ type: "session.error", id: "later-error", properties: { sessionID: session.ids().providerSessionId, error: {
+          name: "APIError", data: { message: "Provider is busy.", statusCode: 503 } } } });
+      }
       const observed = await events;
       const notices = observed.filter(event => event.eventType === "provider.notice.recorded"
         && event.payload.category === "context_compaction");
       expect(notices).toHaveLength(Math.min(overflows, 2));
       expect(notices[0]?.payload).toMatchObject({ severity: "info", recoverable: true, userActionable: false });
-      expect(observed.some(event => event.eventType === "turn.failed")).toBe(failed);
+      const failed = observed.filter(event => event.eventType === "turn.failed");
+      expect(failed).toHaveLength(1);
+      expect((failed[0]?.payload.error as Record<string, unknown>).name).toBe(failure);
     } finally { await session.close({ reason: "test complete" }); }
   });
 
