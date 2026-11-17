@@ -2713,6 +2713,26 @@ console.log(JSON.stringify({ type: "result", subtype: "success", result: "hello"
     const personal = await create("alice", "Personal reconnect");
     await expect(assertAiConnectionCreateAccess(db, actorFor("reconnect-admin", "admin"), companyId, { ...intent, connectionId: personal.connectionId })).rejects.toThrow(/account owner/i);
   });
+  it("saves a manager's reconnect of a company-shared account only with a management context, and never of a personal one", async () => {
+    // The route check above runs before sign-in; save() runs after it. Both must
+    // agree, or a manager finishes the provider sign-in and is then refused.
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "reconnect-save-admin", status: "active", membershipRole: "admin" });
+    const managementContext = {
+      reauthorize: async () => {},
+      audit: { actorType: "user", actorId: "reconnect-save-admin" },
+    } as unknown as Parameters<typeof service.save>[6];
+    const base = { provider: "anthropic", method: "api_key", apiKey: "fixture", agentIds: [], allAgents: true } as const;
+    const shared = await service.save(companyId, "alice", { ...base, ownership: "shared", name: "Shared save reconnect" }, "fixture-shared-save");
+    await db.update(connectionGrants).set({ kind: "organization", subjectUserId: null }).where(eq(connectionGrants.id, shared.grantId));
+    const sharedReconnect = { ...base, ownership: "shared" as const, name: "Shared save reconnect", connectionId: shared.connectionId };
+
+    await expect(service.save(companyId, "reconnect-save-admin", sharedReconnect, "fixture-no-context")).rejects.toThrow(/account owner/i);
+    const saved = await service.save(companyId, "reconnect-save-admin", sharedReconnect, "fixture-manager-reconnected", undefined, new Date(), managementContext);
+    expect(saved).toMatchObject({ connectionId: shared.connectionId, grantId: shared.grantId });
+
+    const personal = await service.save(companyId, "alice", { ...base, ownership: "personal", name: "Personal save reconnect" }, "fixture-personal-save");
+    await expect(service.save(companyId, "reconnect-save-admin", { ...base, ownership: "personal", name: "Personal save reconnect", connectionId: personal.connectionId }, "fixture-personal-takeover", undefined, new Date(), managementContext)).rejects.toThrow(/account owner/i);
+  });
   it("permits new-agent shared installation only for a connection configurator, without bypassing audience", async () => {
     const account = await service.save(companyId, "alice", { provider: "anthropic", method: "api_key", ownership: "shared", name: "Restricted shared", apiKey: "fixture", agentIds: [], allAgents: false }, "fixture-restricted");
     const selected = { provider: "anthropic", method: "api_key", mode: "shared", ...account } as const;
