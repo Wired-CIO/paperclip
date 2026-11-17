@@ -721,6 +721,41 @@ describe.skipIf(!support.supported)("public MCP OAuth and tool boundary", () => 
     } finally { await f.cleanup(); }
   });
 
+  it("maps task analysis filters and person or unassigned creation onto the issue API", async () => {
+    const f = await fixture();
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const execute = createPublicMcpExecutor(db, oauth, dispatch);
+    const projectId = randomUUID();
+    await execute(f.tokens.access_token, "paperclip_search_tasks", { companyId: f.company.id, status: ["todo", "in_progress"], assigneeUserId: "me", projectId, updatedSince: "2026-11-01T00:00:00Z", sortField: "updated", sortDir: "desc" });
+    const searched = new URL("https://x" + String(dispatch.mock.calls[0]?.[2]));
+    expect(Object.fromEntries(searched.searchParams)).toMatchObject({ status: "todo,in_progress", assigneeUserId: f.actor.userId, projectId, updatedSince: "2026-11-01T00:00:00Z", sortField: "updated", sortDir: "desc" });
+    await execute(f.tokens.access_token, "paperclip_search_tasks", { companyId: f.company.id, status: "blocked" });
+    expect(new URL("https://x" + String(dispatch.mock.calls[1]?.[2])).searchParams.get("status")).toBe("blocked");
+    await expect(execute(f.tokens.access_token, "paperclip_search_tasks", { companyId: f.company.id, assigneeUserId: "../other" })).rejects.toThrow();
+
+    dispatch.mockResolvedValue({ id: randomUUID(), title: "t" });
+    await execute(f.tokens.access_token, "paperclip_create_task", { companyId: f.company.id, requestId: randomUUID(), title: "Backlog idea", description: "" });
+    expect(dispatch.mock.calls.at(-1)?.[3]).toMatchObject({ status: "backlog" });
+    expect(dispatch.mock.calls.at(-1)?.[3]).not.toHaveProperty("assigneeAgentId");
+    await execute(f.tokens.access_token, "paperclip_create_task", { companyId: f.company.id, requestId: randomUUID(), title: "Mine", description: "", assigneeUserId: "me", priority: "high" });
+    expect(dispatch.mock.calls.at(-1)?.[3]).toMatchObject({ status: "todo", assigneeUserId: f.actor.userId, priority: "high" });
+    const calls = dispatch.mock.calls.length;
+    await expect(execute(f.tokens.access_token, "paperclip_create_task", { companyId: f.company.id, requestId: randomUUID(), title: "Both", description: "", assigneeUserId: "me", assigneeAgentId: randomUUID() })).rejects.toThrow();
+    expect(dispatch).toHaveBeenCalledTimes(calls);
+  });
+
+  it("creates a task for the connected person and finds it with analysis filters through real routes", async () => {
+    const f = await expandedFixture();
+    try {
+      const created = await f.call("paperclip_create_task", { requestId: randomUUID(), title: "Review the Q4 numbers", description: "For me", assigneeUserId: "me" });
+      expect(created).toMatchObject({ task: { assigneeUserId: f.actor.userId, assigneeAgentId: null, status: "todo" } });
+      const mine = await f.call("paperclip_search_tasks", { assigneeUserId: "me", status: ["todo", "in_progress"] });
+      expect((mine.tasks as Array<{ id: string }>).map(t => t.id)).toEqual([(created.task as { id: string }).id]);
+      const backlog = await f.call("paperclip_search_tasks", { status: ["backlog"], sortField: "created", sortDir: "asc" });
+      expect((backlog.tasks as Array<{ id: string }>).map(t => t.id)).toEqual([f.issue.id]);
+    } finally { await f.cleanup(); }
+  });
+
   it("edits, blocks and completes tasks through real routes and rejects review overrides", async () => {
     const f = await expandedFixture();
     try {
