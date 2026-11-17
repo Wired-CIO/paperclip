@@ -2721,7 +2721,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", result: "hello"
       reauthorize: async () => {},
       audit: { actorType: "user", actorId: "reconnect-save-admin" },
     } as unknown as Parameters<typeof service.save>[6];
-    const base = { provider: "anthropic", method: "api_key", apiKey: "fixture", agentIds: [], allAgents: true } as const;
+    const base = { provider: "anthropic" as const, method: "api_key" as const, apiKey: "fixture", agentIds: [] as string[], allAgents: true };
     const shared = await service.save(companyId, "alice", { ...base, ownership: "shared", name: "Shared save reconnect" }, "fixture-shared-save");
     await db.update(connectionGrants).set({ kind: "organization", subjectUserId: null }).where(eq(connectionGrants.id, shared.grantId));
     const sharedReconnect = { ...base, ownership: "shared" as const, name: "Shared save reconnect", connectionId: shared.connectionId };
