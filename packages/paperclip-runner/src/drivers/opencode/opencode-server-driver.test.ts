@@ -35,7 +35,9 @@ import { localIntegrityBoundaryGolden } from "../../../test-support/local-integr
 import type { PrpEvent } from "../../protocol/replay-contract.js";
 import {
   OpenCodeServerDriver,
+  openCodeContextSettings,
   openCodeServerDriverInternals,
+  parseModelContextWindow,
 } from "./opencode-server-driver.js";
 
 const upstreamTransport = vi.hoisted(() => ({ endpoint: "", urls: [] as string[] }));
@@ -3107,6 +3109,71 @@ describe("OpenCodeServerDriver", () => {
       expect((failure?.payload.error as Record<string, unknown>).message).toBeUndefined();
       expect(observed.find(event => event.eventType === "provider.notice.recorded")?.payload.summary).toBe("Provider is busy.");
       expect(JSON.stringify(failure)).not.toContain("private-body");
+    } finally { await session.close({ reason: "test complete" }); }
+  });
+
+  it("reads a model's context window from an OpenAI-compatible models listing", () => {
+    const listing = { data: [
+      { id: "other", max_model_len: 8_192 },
+      { id: "qwen3.8-27b", object: "model", max_model_len: 131_072 },
+      { id: "routed", context_length: 200_000 },
+      { id: "tiny", max_model_len: 512 },
+      { id: "text", max_model_len: "131072" },
+    ] };
+    expect(parseModelContextWindow(listing, "qwen3.8-27b")).toBe(131_072);
+    expect(parseModelContextWindow(listing, "routed")).toBe(200_000);
+    expect(parseModelContextWindow(listing, "tiny")).toBeUndefined();
+    expect(parseModelContextWindow(listing, "text")).toBeUndefined();
+    expect(parseModelContextWindow(listing, "missing")).toBeUndefined();
+    expect(parseModelContextWindow({ error: "nope" }, "qwen3.8-27b")).toBeUndefined();
+  });
+
+  it("sets limits so OpenCode compacts at 90% and a request under that still fits", () => {
+    const { limit, compaction } = openCodeContextSettings(131_072);
+    expect(compaction).toEqual({ auto: true, prune: true, reserved: 13_108 });
+    expect(limit).toEqual({ context: 131_072, input: 131_072, output: 13_108 });
+    // OpenCode compacts once usage reaches limit.input - reserved.
+    expect((limit.input - compaction.reserved) / limit.context).toBeCloseTo(0.9, 3);
+    // Output never exceeds the reserve, so prompt + max_tokens stays within the window.
+    expect(limit.input - compaction.reserved + limit.output).toBeLessThanOrEqual(limit.context);
+    expect(openCodeContextSettings(1_000_000).limit.output).toBe(32_000);
+  });
+
+  it.each([
+    { name: "keeps the turn running while OpenCode compacts after a context overflow", overflows: 1, failed: false },
+    { name: "fails a turn that keeps overflowing after compaction", overflows: 3, failed: true },
+  ])("$name", async ({ overflows, failed }) => {
+    await chmod(fixture, 0o755);
+    const root = await mkdtemp(join(tmpdir(), "paperclip-opencode-overflow-"));
+    const workspace = await mkdtemp(join(tmpdir(), "paperclip-opencode-overflow-workspace-"));
+    roots.push(root, workspace);
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+    let streamOpened!: () => void;
+    const opened = new Promise<void>(resolve => { streamOpened = resolve; });
+    const driver = new OpenCodeServerDriver({
+      model: "openrouter/deepseek/deepseek-v4-flash-0731", runtimeDirectory: root, command: fixture,
+      environment: { PATH: process.env.PATH, OPENROUTER_API_KEY: "fixture-key" },
+      fetch: async (input, init) => String(input).endsWith("/event")
+        ? new Response(new ReadableStream<Uint8Array>({ start(controller) { stream = controller; streamOpened(); } }), { headers: { "Content-Type": "text/event-stream" } })
+        : fetch(input, init),
+    });
+    const session = await driver.openSession({ runId: `overflow-${overflows}`, normalizedSessionId: `overflow-${overflows}`, workingDirectory: workspace });
+    const send = (event: Record<string, unknown>) => stream.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+    try {
+      const events = collectTurnEvents(session.events());
+      await session.startTurn({ message: { role: "user", text: "long task" } });
+      await opened;
+      for (let index = 0; index < overflows; index += 1) {
+        send({ type: "session.error", properties: { sessionID: session.ids().providerSessionId, error: {
+          name: "ContextOverflowError", data: { message: "This model's maximum context length is 131072 tokens." } } } });
+      }
+      if (!failed) send({ type: "session.idle", properties: { sessionID: session.ids().providerSessionId } });
+      const observed = await events;
+      const notices = observed.filter(event => event.eventType === "provider.notice.recorded"
+        && event.payload.category === "context_compaction");
+      expect(notices).toHaveLength(Math.min(overflows, 2));
+      expect(notices[0]?.payload).toMatchObject({ severity: "info", recoverable: true, userActionable: false });
+      expect(observed.some(event => event.eventType === "turn.failed")).toBe(failed);
     } finally { await session.close({ reason: "test complete" }); }
   });
 
