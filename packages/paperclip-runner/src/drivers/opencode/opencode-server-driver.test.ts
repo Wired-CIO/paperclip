@@ -3181,7 +3181,7 @@ describe("OpenCodeServerDriver", () => {
       expect(firstText).not.toContain("Be brief.");
       expect(JSON.parse(firstText).task.prompt).toBe('wake\n[Standing guidance "chat_mode" is in your system instructions for this turn.]\nmode: ask.');
 
-      session.attachRun({ runId: "run-next" });
+      session.attachRun!({ runId: "run-next" });
       await runTurn('{"interactionResponses":[{"answer":"friendly"}]}');
       expect(submitted[1]).toHaveProperty("system", `base system\n\n${guidance}`);
       expect(submitted[1].parts).toEqual([{ type: "text", text: '{"interactionResponses":[{"answer":"friendly"}]}' }]);
