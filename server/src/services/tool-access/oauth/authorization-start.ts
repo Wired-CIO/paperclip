@@ -22,6 +22,7 @@ import { assertSupportedConnection } from "../connections/setup-policy.js";
 
 import { actorBinding } from "../actor.js";
 import { assertOAuthRedirectConstraints, randomOauthToken, base64UrlSha256 } from "./authorization-constraints.js";
+import { isMicrosoftEntraAuthorizationHost } from "./entra.js";
 import type { createPersonalConnectionIdentity } from "../connections/personal-identity.js";
 
 type Dependencies = {
@@ -549,9 +550,17 @@ export function createOAuthAuthorizationStart(db: Db, dependencies: Dependencies
         "prompt",
         reviewedAuthorizationParams.prompt,
       );
-    else if (!galleryMethod && authorizationScopes.includes("offline_access"))
+    else if (
+      !galleryMethod
+      && authorizationScopes.includes("offline_access")
+      && !isMicrosoftEntraAuthorizationHost(authorizationUrl.hostname)
+    )
       // OIDC offline access requires consent unless the provider has another
       // established basis for granting it. A generic server has no reviewed override.
+      // Microsoft Entra is excluded: it issues refresh tokens for offline_access
+      // under an existing admin or user grant, and prompt=consent makes it ignore
+      // an admin grant and demand user consent, which tenants that restrict user
+      // consent refuse ("Need admin approval") for every non-admin account.
       authorizationUrl.searchParams.set("prompt", "consent");
 
     if (
