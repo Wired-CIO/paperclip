@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { buildPaperclipTaskMarkdown } from "./task-markdown.js";
+import { buildPaperclipTaskMarkdown, STANDING_GUIDANCE_TAG } from "./task-markdown.js";
 
 const issue = {
   id: "task-1",
@@ -92,6 +92,22 @@ describe("heartbeat task markdown rendering", () => {
     expect(buildPaperclipTaskMarkdown({ issue: chat, nativeRunner: true })).not.toContain("Status Cards:");
     expect(buildPaperclipTaskMarkdown({ issue: { ...chat, conversationAgentId: null }, nativeRunner: true, statusCardsEnabled: true }))
       .not.toContain("Status Cards:");
+  });
+  it("fences static chat guidance for the native runner only, leaving the per-wake mode outside the fence", () => {
+    const chat = { id: "chat", identifier: "RUN-1", title: "Chat", conversationAgentId: "ceo", workMode: "ask" };
+    const native = buildPaperclipTaskMarkdown({ issue: chat, nativeRunner: true, statusCardsEnabled: true })!;
+    const fence = (name: string) => new RegExp(`\\n<${STANDING_GUIDANCE_TAG} name="${name}">\\n[\\s\\S]*?\\n</${STANDING_GUIDANCE_TAG}>`);
+    expect(native).toMatch(fence("task_questions"));
+    expect(native).toMatch(fence("chat_mode"));
+    expect(native).toMatch(fence("status_cards"));
+    const chatBlock = native.match(fence("chat_mode"))![0];
+    expect(chatBlock).toContain("Chat mode directive:\nYou are in an ongoing conversation with the user.");
+    expect(chatBlock).not.toContain("Current composer mode");
+    expect(native).toContain(`</${STANDING_GUIDANCE_TAG}>\nCurrent composer mode: ask.`);
+
+    const adapter = buildPaperclipTaskMarkdown({ issue: chat, nativeRunner: false, statusCardsEnabled: true })!;
+    expect(adapter).not.toContain(STANDING_GUIDANCE_TAG);
+    expect(adapter).toContain("\nChat mode directive:\nYou are in an ongoing conversation with the user.");
   });
   it("returns null without a task or a nonempty wake comment", () => {
     expect(buildPaperclipTaskMarkdown({ issue: null })).toBeNull();

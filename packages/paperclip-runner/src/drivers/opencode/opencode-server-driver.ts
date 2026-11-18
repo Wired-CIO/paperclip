@@ -557,6 +557,7 @@ class OpenCodeHarnessSession implements HarnessSession {
   #usage: Record<string, unknown> | null = null;
   readonly #conversationMode: "task" | "prepared";
   #sendFullContext: boolean;
+  #turnStandingGuidance: string[] = [];
   readonly #companyObservability: ReturnType<typeof createOpenCodeCompanyObservability>;
   #closed = false;
   #completionSettlement: Promise<void> | null = null;
@@ -748,12 +749,20 @@ class OpenCodeHarnessSession implements HarnessSession {
     // Keep the task envelope only on the initial task-mode wake. OpenCode
     // rebuilds system instructions from the latest user message, so system
     // instructions must still accompany every prompt (including recovery).
+    // Static wake guidance (chat directive etc.) rides in the per-turn system
+    // channel: OpenCode applies only the latest user message's system and never
+    // adds it to history, so it neither piles up on resumed sessions nor gets
+    // summarised away by compaction.
+    // A message without guidance (e.g. a bare interaction response) keeps the
+    // last set, since the history now holds only pointers to it.
+    const lifted = liftStandingGuidance(input.message.text);
+    if (lifted.guidance.length > 0) this.#turnStandingGuidance = lifted.guidance;
     const prompt = this.#sendFullContext
       ? JSON.stringify({
           task: this.#taskEnvelope,
-          message: input.message.text,
+          message: lifted.text,
         })
-      : input.message.text;
+      : lifted.text;
     await this.#submitPrompt(prompt);
     this.#sendFullContext = false;
     return { turnId };
@@ -786,7 +795,9 @@ class OpenCodeHarnessSession implements HarnessSession {
           // Keep question enabled in the isolated config. OpenCode 1.18.32
           // turns a prompt's deprecated `tools` map into replacement session
           // permissions, so a sparse override here discards the session policy.
-          system: this.#systemInstructions,
+          system: this.#turnStandingGuidance.length
+            ? [this.#systemInstructions, ...this.#turnStandingGuidance].join("\n\n")
+            : this.#systemInstructions,
           parts: [{ type: "text", text: prompt }],
         }),
       },
@@ -3389,6 +3400,50 @@ function bounded(value: unknown): Record<string, unknown> {
 function record(value: unknown): Record<string, unknown> {
   return isRecord(value) ? value : {};
 }
+/** Must match STANDING_GUIDANCE_TAG in server/src/services/heartbeat/task-markdown.ts. */
+const STANDING_GUIDANCE_PATTERN =
+  /\n?<paperclip-standing-guidance name="([A-Za-z0-9_-]+)">\n([\s\S]*?)\n<\/paperclip-standing-guidance>/g;
+
+/**
+ * Moves fenced standing guidance out of a wake message. The message is either
+ * a native model envelope (JSON with task.prompt) or plain text; anything that
+ * carries no fenced block is returned unchanged. Later blocks with the same
+ * name replace earlier ones.
+ */
+export function liftStandingGuidance(text: string): {
+  text: string;
+  guidance: string[];
+} {
+  const lift = (source: string) => {
+    const byName = new Map<string, string>();
+    const stripped = source.replace(
+      STANDING_GUIDANCE_PATTERN,
+      (_match, name: string, body: string) => {
+        byName.set(name, `<paperclip-standing-guidance name="${name}">\n${body}\n</paperclip-standing-guidance>`);
+        return `\n[Standing guidance "${name}" is in your system instructions for this turn.]`;
+      },
+    );
+    return { stripped, guidance: [...byName.values()] };
+  };
+  let envelope: unknown;
+  try {
+    envelope = JSON.parse(text);
+  } catch {
+    envelope = undefined;
+  }
+  if (isRecord(envelope) && isRecord(envelope.task) && typeof envelope.task.prompt === "string") {
+    const { stripped, guidance } = lift(envelope.task.prompt);
+    if (guidance.length === 0) return { text, guidance };
+    return {
+      text: JSON.stringify({ ...envelope, task: { ...envelope.task, prompt: stripped } }),
+      guidance,
+    };
+  }
+  if (envelope !== undefined) return { text, guidance: [] };
+  const { stripped, guidance } = lift(text);
+  return guidance.length === 0 ? { text, guidance } : { text: stripped, guidance };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
