@@ -36,6 +36,7 @@ import type { PrpEvent } from "../../protocol/replay-contract.js";
 import {
   OpenCodeServerDriver,
   openCodeContextSettings,
+  liftStandingGuidance,
   openCodeServerDriverInternals,
   parseModelContextWindow,
 } from "./opencode-server-driver.js";
@@ -3120,6 +3121,73 @@ describe("OpenCodeServerDriver", () => {
       expect(observed.find(event => event.eventType === "provider.notice.recorded")?.payload.summary).toBe("Provider is busy.");
       expect(JSON.stringify(failure)).not.toContain("private-body");
     } finally { await session.close({ reason: "test complete" }); }
+  });
+
+  it("lifts fenced standing guidance out of a native envelope and plain text, keeping the last of each name", () => {
+    const block = (name: string, body: string) =>
+      `\n<paperclip-standing-guidance name="${name}">\n${body}\n</paperclip-standing-guidance>`;
+    const prompt = `## Wake\nnew comment${block("chat_mode", "Chat mode directive:\nPara one.\n\nPara two.")}\nCurrent composer mode: ask.${block("status_cards", "Status Cards:\nold")}${block("status_cards", "Status Cards:\nnew")}`;
+    const envelope = { schema: "paperclip.native-model-envelope.v3", requestedSkills: [], task: { identifier: "RUN-1", prompt }, completionContract: { revision: "1" } };
+
+    const lifted = liftStandingGuidance(JSON.stringify(envelope));
+    const sent = JSON.parse(lifted.text);
+    expect(sent.task.prompt).toBe(
+      '## Wake\nnew comment\n[Standing guidance "chat_mode" is in your system instructions for this turn.]\nCurrent composer mode: ask.' +
+      '\n[Standing guidance "status_cards" is in your system instructions for this turn.]'.repeat(2),
+    );
+    expect({ ...sent, task: { ...sent.task, prompt: "" } }).toEqual({ ...envelope, task: { ...envelope.task, prompt: "" } });
+    expect(lifted.guidance).toEqual([
+      '<paperclip-standing-guidance name="chat_mode">\nChat mode directive:\nPara one.\n\nPara two.\n</paperclip-standing-guidance>',
+      '<paperclip-standing-guidance name="status_cards">\nStatus Cards:\nnew\n</paperclip-standing-guidance>',
+    ]);
+
+    expect(liftStandingGuidance(prompt).guidance).toHaveLength(2);
+    for (const untouched of ['{"interactionResponses":[{"answer":"friendly"}]}', "plain wake text", JSON.stringify({ task: { prompt: "no fences" } })]) {
+      expect(liftStandingGuidance(untouched)).toEqual({ text: untouched, guidance: [] });
+    }
+  });
+
+  it("sends standing guidance through system on resumed turns and keeps it for a turn that carries none", async () => {
+    await chmod(fixture, 0o755);
+    const root = await mkdtemp(join(tmpdir(), "paperclip-opencode-standing-"));
+    const workspace = await mkdtemp(join(tmpdir(), "paperclip-opencode-standing-workspace-"));
+    roots.push(root, workspace);
+    const submitted: Record<string, unknown>[] = [];
+    const driver = new OpenCodeServerDriver({
+      model: "openrouter/deepseek/deepseek-v4-flash-0731",
+      runtimeDirectory: root,
+      command: fixture,
+      systemInstructions: "base system",
+      environment: { PATH: process.env.PATH, OPENROUTER_API_KEY: "fixture-key" },
+      fetch: async (input, init) => {
+        if (String(input).endsWith("/prompt_async")) submitted.push(JSON.parse(String(init?.body)));
+        return fetch(input, init);
+      },
+    });
+    const seed = await driver.openSession({ runId: "run-seed", normalizedSessionId: "standing", workingDirectory: workspace });
+    const snapshot = await seed.snapshot();
+    await seed.close({ reason: "seed complete" });
+    const recovered = await driver.recoverSession?.(snapshot);
+    const session = recovered!.session!;
+    const guidance = '<paperclip-standing-guidance name="chat_mode">\nChat mode directive:\nBe brief.\n</paperclip-standing-guidance>';
+    const runTurn = async (text: string) => {
+      await session.startTurn({ message: { role: "user", text } });
+      for await (const event of session.events()) if (event.eventType === "turn.completed") break;
+    };
+    try {
+      await runTurn(JSON.stringify({ schema: "paperclip.native-model-envelope.v3", task: { prompt: `wake\n${guidance}\nmode: ask.` } }));
+      expect(submitted[0]).toHaveProperty("system", `base system\n\n${guidance}`);
+      const firstText = (submitted[0].parts as Array<{ text: string }>)[0].text;
+      expect(firstText).not.toContain("Be brief.");
+      expect(JSON.parse(firstText).task.prompt).toBe('wake\n[Standing guidance "chat_mode" is in your system instructions for this turn.]\nmode: ask.');
+
+      session.attachRun({ runId: "run-next" });
+      await runTurn('{"interactionResponses":[{"answer":"friendly"}]}');
+      expect(submitted[1]).toHaveProperty("system", `base system\n\n${guidance}`);
+      expect(submitted[1].parts).toEqual([{ type: "text", text: '{"interactionResponses":[{"answer":"friendly"}]}' }]);
+    } finally {
+      await session.close({ reason: "standing-test" });
+    }
   });
 
   it("reads a model's context window from an OpenAI-compatible models listing", () => {
