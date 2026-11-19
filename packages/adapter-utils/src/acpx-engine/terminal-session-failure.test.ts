@@ -116,6 +116,13 @@ describe("terminal session failure diagnostics", () => {
     expect(diagnostic.details).toBe(details);
   });
 
+  it("keeps a provider reset time readable when the run environment carries git flag values", () => {
+    const details = "You've hit your org's monthly spend limit · your session limit resets 6:20pm (UTC), 10 of 11 requests";
+    expect(sanitizeTerminalSessionFailure({ category: "limit", details }, {
+      GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1",
+    }).details).toBe(details);
+  });
+
   it("redacts short credentials even inside words, paths and punctuated strings", () => {
     const diagnostic = sanitizeTerminalSessionFailure({
       category: "access", details: "upstream abc-def /abc/path xabcx abc.value abc_other",
