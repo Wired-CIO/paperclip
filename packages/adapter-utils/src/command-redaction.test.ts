@@ -206,6 +206,12 @@ describe("diagnostic environment secret selection", () => {
     },
   );
 
+  it("does not treat the git flags Paperclip sets on a run as credentials", () => {
+    expect(collectDiagnosticEnvironmentSecrets({ GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1" })).toEqual([]);
+    // Only the flag values are public: anything else under these names stays private.
+    expect(collectDiagnosticEnvironmentSecrets({ GIT_TERMINAL_PROMPT: "opaque" })).toEqual(["opaque"]);
+  });
+
   it("recognizes credential content and declared bindings under arbitrary names", () => {
     const jwt = `${Buffer.from('{"alg":"HS256"}').toString("base64url")}.e30.c2ln`;
     const pem = "-----BEGIN PRIVATE KEY-----\nprivate-canary\n-----END PRIVATE KEY-----";
