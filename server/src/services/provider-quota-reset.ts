@@ -2,10 +2,16 @@
  * Reads a provider's "try again at 4:30 PM (America/Chicago)" or
  * "resets 2am (UTC)" wording as the next matching wall-clock instant after
  * `now`. A clock without a time zone is read as UTC.
+ *
+ * The clock must end where the match ends. Diagnostic redaction can replace
+ * part of it ("resets 6:2***REDACTED***pm"), and reading the surviving "6" as
+ * 06:00 holds the agent until the next morning instead of that evening. A
+ * clock that runs on into a digit, a colon or a redaction marker is unreadable,
+ * so the caller falls back to its default backoff.
  */
 export function parseProviderQuotaClockReset(error: string, now: Date) {
   const match = error.match(
-    /(?:try again at|resets?(?:\s+at)?)\s+(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s*m\.?)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/i,
+    /(?:try again at|resets?(?:\s+at)?)\s+(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s*m\.?)?(?![\d:*])(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/i,
   );
   if (!match) return null;
 
