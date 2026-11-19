@@ -9,12 +9,16 @@ import {
   runIdentityContexts,
   type Db,
 } from "@paperclipai/db";
-import { githubIdentityEnvKey } from "@paperclipai/adapter-utils/github-launcher";
+import {
+  githubIdentityEnvKey,
+  isGitHubIdentityEnvKey,
+} from "@paperclipai/adapter-utils/github-launcher";
 import { parseObject } from "../adapters/utils.js";
 import { forbidden } from "../errors.js";
 import { captureRunIdentity, type RunIdentityContext } from "./run-identity.js";
 import {
   buildGitAuthInvocation,
+  NO_MANAGED_GITHUB_IDENTITY,
   resolveManagedGitHubCredential,
 } from "./git-credentials.js";
 import { secretService } from "./secrets.js";
@@ -182,6 +186,27 @@ async function resolveNamedGitHubIdentity(
 }
 
 /**
+ * The agent's only `<NAME>_GH_TOKEN` binding, as an identity name. An operator who
+ * binds exactly one named identity to an agent has said which GitHub account that
+ * agent works as, so it is the default when the run has no managed identity. Only
+ * the agent's own bindings count (never the project's), and two or more bindings
+ * stay explicit: the agent must choose with `PAPERCLIP_GITHUB_IDENTITY`.
+ */
+async function soleAgentGitHubIdentity(
+  db: Db,
+  run: typeof heartbeatRuns.$inferSelect,
+): Promise<string | null> {
+  const [agent] = await db
+    .select({ adapterConfig: agents.adapterConfig })
+    .from(agents)
+    .where(and(eq(agents.id, run.agentId), eq(agents.companyId, run.companyId)));
+  const keys = Object.keys(parseObject(agent?.adapterConfig?.env)).filter(isGitHubIdentityEnvKey);
+  if (keys.length !== 1) return null;
+  const identity = keys[0]!.slice(0, -"_GH_TOKEN".length).toLowerCase();
+  return githubIdentityEnvKey(identity) === keys[0] ? identity : null;
+}
+
+/**
  * Without `identity`, no company secrets or ambient credentials are consulted.
  * With `identity`, only the agent's own `<NAME>_GH_TOKEN` binding is.
  */
@@ -212,6 +237,7 @@ export async function resolveGitHubOperationCredentials(
   if (!context) throw forbidden("This run predates managed GitHub credentials");
   let summary: GitHubCredentialSummary;
   let env: Record<string, string> = {};
+  let fallbackIdentity: string | null = null;
   // A sponsored guest's responsible person is an internal accountability field,
   // not authorization to export that person's (or a dedicated bot's) token.
   // Re-read every policy source for each operation, including a run's retained
@@ -290,6 +316,12 @@ export async function resolveGitHubOperationCredentials(
         source: resolved.identitySource ?? "personal",
         reason: resolved.error ?? "No GitHub identity connected",
       };
+      // Nothing managed to fall back from: a broken or ambiguous managed identity
+      // still fails closed, so a bound token never masks a connection that needs
+      // attention or stands in for a person's account.
+      if (!resolved.configured || resolved.error === NO_MANAGED_GITHUB_IDENTITY) {
+        fallbackIdentity = await soleAgentGitHubIdentity(db, run);
+      }
     }
   } catch {
     // Provider/secret errors can contain sensitive response bodies. Never persist them.
@@ -299,6 +331,28 @@ export async function resolveGitHubOperationCredentials(
     };
   }
   if (context) await saveGitHubSummary(db, context, summary);
+  if (fallbackIdentity) {
+    // Like an explicit named identity, the fallback is operation-scoped: the run's
+    // recorded managed identity above stays as it resolved.
+    try {
+      const named = await resolveNamedGitHubIdentity(
+        db,
+        run,
+        fallbackIdentity,
+        context.cause === "company_default" ? null : (context.responsibleUserId ?? null),
+      );
+      if (named.summary.status === "available") {
+        return {
+          identityContextId: context.id,
+          revision: context.revision,
+          ...named.summary,
+          env: named.env,
+        };
+      }
+    } catch {
+      // Secret-store errors can carry sensitive detail. Report the managed result.
+    }
+  }
   return {
     identityContextId: context?.id ?? null,
     revision: context?.revision ?? null,
