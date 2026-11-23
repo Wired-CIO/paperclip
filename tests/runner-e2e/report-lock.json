@@ -1,6 +1,6 @@
 {
-  "inputSha256": "707f968a6c8b529907c265ae7f19679e40492709dc07b6c632c56eaf7d47b96b",
-  "outputSha256": "707f968a6c8b529907c265ae7f19679e40492709dc07b6c632c56eaf7d47b96b",
+  "inputSha256": "b82bdde0b9ec4b4215ec37ca2385caf6175b0895b67bc8d135856426c08d921a",
+  "outputSha256": "b82bdde0b9ec4b4215ec37ca2385caf6175b0895b67bc8d135856426c08d921a",
   "patchSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "basis": "WiredCIO fork correction over upstream's reviewed lockfile: adds the packages/wiredcio-mcp importer and the cli better-auth entry (regenerated with pnpm 9.15.4 --no-frozen-lockfile after the 2026-11-23 upstream sync). Input and output are the committed lockfile's sha256 and the correction patch is empty; review with the sync pull request."
 }
