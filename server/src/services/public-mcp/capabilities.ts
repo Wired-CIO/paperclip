@@ -84,6 +84,14 @@ export const publicMcpCapabilities: Capability[] = [
     run: async (p, a, api) => ({ agents: rows(await api(p, "GET", `/companies/${a.companyId}/agents`)).map((v) => pick(v, ["id", "name", "role", "title", "status", "capabilities"])) }),
   },
   {
+    name: "paperclip_list_people", description: "List the people (active human members) of the authorized company. Use a returned userId as assigneeUserId to give a task to a person instead of an agent.",
+    schema: z.object(company).strict(),
+    run: async (p, a, api) => ({ people: rows(object(await api(p, "GET", `/companies/${a.companyId}/user-directory`)).users).map((v) => {
+      const member = object(v);
+      return { userId: member.principalId, name: object(member.user).name ?? null, role: member.membershipRole ?? null };
+    }) }),
+  },
+  {
     name: "paperclip_list_projects", description: "List projects in the authorized company.",
     schema: z.object(company).strict(),
     run: async (p, a, api) => ({ projects: rows(await api(p, "GET", `/companies/${a.companyId}/projects`)).map((v) => pick(v, ["id", "name", "description", "status"])) }),
@@ -143,7 +151,8 @@ export const publicMcpCapabilities: Capability[] = [
         idempotencyKey: `mcp:${hashMcpSecret(p.grant.companyId + ":" + p.grant.userId)}:${a.requestId}`,
       });
       return { task: pick(result, taskFields), url: origin + "/" + pathId(p.company.issuePrefix) + "/issues/" + pathId(object(result).identifier ?? object(result).id),
-        scheduling: "Submitted to normal Paperclip scheduling. Creation does not guarantee execution has started." };
+        scheduling: a.assigneeAgentId ? "Submitted to normal Paperclip scheduling. Creation does not guarantee execution has started."
+          : a.assigneeUserId ? "Assigned to a person. No agent run was started." : "Left unassigned. No agent run was started." };
     },
   },
   {

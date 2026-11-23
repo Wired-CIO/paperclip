@@ -89,6 +89,13 @@ const mockExternalObjectService = vi.hoisted(() => ({
 }));
 const mockAccessService = vi.hoisted(() => ({
   decide: vi.fn(),
+  // Batched reads (filterIssuesForActor) reuse the single-decision mock per resource.
+  decideReads: vi.fn(async (actor: unknown, resources: Array<{ type: string }>) =>
+    Promise.all(resources.map((resource) => mockAccessService.decide({
+      actor,
+      action: resource.type === "issue" ? "issue:read" : resource.type === "project" ? "project:read" : "company_scope:read",
+      resource,
+    })))),
   canUser: vi.fn(),
   hasPermission: vi.fn(),
 }));
@@ -233,14 +240,34 @@ function boardActor(role: Role) {
   };
 }
 
-// The candidate-issue query in the bulk summaries route is the only direct db
-// read these routes make; it returns whatever the test put in candidateIssueRows.
+// Direct db reads these routes make. The candidate-issue query in the bulk
+// summaries route returns whatever the test put in candidateIssueRows. The
+// agent-interaction policy (assertAgentInteraction, run before the visibility
+// checks on agent writes) reads the target task and the acting agent; it gets
+// the visible task and an agent with no interaction restrictions, so it never
+// decides anything here.
 const fakeDb = {
-  select: () => ({
-    from: () => ({
-      where: async () => candidateIssueRows.rows,
-    }),
-  }),
+  select: (columns?: Record<string, unknown>) => {
+    const keys = columns ? Object.keys(columns).sort().join(",") : "";
+    const policyRows =
+      keys === "assigneeAgentId,conversationAgentId,id"
+        ? [{ id: VISIBLE_ISSUE_ID, assigneeAgentId: null, conversationAgentId: null }]
+        : keys === "companyId,id,permissions"
+          ? [{ id: "agent-caller", companyId: COMPANY_ID, permissions: null }]
+          : null;
+    const chain = (rows: unknown[]) => ({
+      then: (resolve: (rows: unknown[]) => unknown, reject?: (err: unknown) => unknown) =>
+        Promise.resolve(rows).then(resolve, reject),
+      orderBy: () => chain(rows),
+      limit: () => chain(rows),
+      for: () => chain(rows),
+    });
+    return {
+      from: () => ({
+        where: () => chain(policyRows ?? candidateIssueRows.rows),
+      }),
+    };
+  },
 };
 
 async function createApp(role: Role) {

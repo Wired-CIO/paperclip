@@ -15,7 +15,7 @@ import {
 } from "@paperclipai/adapter-utils/github-launcher";
 import { parseObject } from "../adapters/utils.js";
 import { forbidden } from "../errors.js";
-import { captureRunIdentity, type RunIdentityContext } from "./run-identity.js";
+import { captureRunCompletionIdentity, captureRunIdentity, type RunIdentityContext } from "./run-identity.js";
 import {
   buildGitAuthInvocation,
   NO_MANAGED_GITHUB_IDENTITY,
@@ -35,10 +35,13 @@ export type GitHubCredentialSummary = {
   authenticationMode?: "managed" | "host" | "anonymous";
 };
 
+type GitHubCredentialRun = Pick<typeof heartbeatRuns.$inferSelect,
+  "id" | "companyId" | "agentId" | "nativeIssueId" | "contextSnapshot">;
+
 /** A raw GitHub token cannot enforce the low-trust read-only tool boundary. */
 async function allowsGitHubCredentialExport(
   db: Db,
-  run: typeof heartbeatRuns.$inferSelect,
+  run: GitHubCredentialRun,
 ) {
   const issueId =
     run.contextSnapshot?.issueId ??
@@ -117,7 +120,7 @@ async function allowsGitHubCredentialExport(
  */
 async function resolveNamedGitHubIdentity(
   db: Db,
-  run: typeof heartbeatRuns.$inferSelect,
+  run: GitHubCredentialRun,
   identity: string,
   responsibleUserId: string | null,
 ): Promise<{ summary: GitHubCredentialSummary; env: Record<string, string> }> {
@@ -194,7 +197,7 @@ async function resolveNamedGitHubIdentity(
  */
 async function soleAgentGitHubIdentity(
   db: Db,
-  run: typeof heartbeatRuns.$inferSelect,
+  run: GitHubCredentialRun,
 ): Promise<string | null> {
   const [agent] = await db
     .select({ adapterConfig: agents.adapterConfig })
@@ -235,6 +238,27 @@ export async function resolveGitHubOperationCredentials(
 ) {
   const { run, context } = await captureRunIdentity(db, input, { readScope: "github_credentials" });
   if (!context) throw forbidden("This run predates managed GitHub credentials");
+  return resolveCapturedGitHubCredentials(db, run, context, input.identity);
+}
+
+export async function resolveGitHubCompletionCredentials(
+  db: Db,
+  input: { companyId: string; issueId: string; runId: string },
+) {
+  const [source] = await db.select({ agentId: heartbeatRuns.agentId })
+    .from(heartbeatRuns).where(and(eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId),
+    eq(heartbeatRuns.nativeIssueId, input.issueId))).limit(1);
+  if (!source) throw forbidden("GitHub completion requires the bound task run");
+  const { run, context } = await captureRunCompletionIdentity(db, { ...input, agentId: source.agentId });
+  if (!run.activeIdentityContextId && !context) return { status: "absent" as const, env: {} as Record<string, string> };
+  if (!context || context.companyId !== run.companyId || context.status !== "accepted") {
+    throw forbidden("GitHub completion requires the run's accepted identity");
+  }
+  return resolveCapturedGitHubCredentials(db, run, context);
+}
+
+/** `identity` names an agent-configured `<NAME>_GH_TOKEN` identity (WiredCIO); an operation-scoped override. */
+async function resolveCapturedGitHubCredentials(db: Db, run: GitHubCredentialRun, context: RunIdentityContext, identity?: string) {
   let summary: GitHubCredentialSummary;
   let env: Record<string, string> = {};
   let fallbackIdentity: string | null = null;
@@ -256,7 +280,7 @@ export async function resolveGitHubOperationCredentials(
       env,
     };
   }
-  if (input.identity !== undefined) {
+  if (identity !== undefined) {
     // A named identity is an operation-scoped override. It does not replace the
     // run's recorded managed identity, so runIdentityContexts is left untouched.
     let named: { summary: GitHubCredentialSummary; env: Record<string, string> };
@@ -264,7 +288,7 @@ export async function resolveGitHubOperationCredentials(
       named = await resolveNamedGitHubIdentity(
         db,
         run,
-        input.identity,
+        identity,
         context.cause === "company_default" ? null : (context.responsibleUserId ?? null),
       );
     } catch {
@@ -285,10 +309,10 @@ export async function resolveGitHubOperationCredentials(
     const resolved = await resolveManagedGitHubCredential(
       db,
       secretService(db),
-      input.companyId,
+      run.companyId,
       {
-        agentId: input.agentId,
-        heartbeatRunId: input.runId,
+        agentId: run.agentId,
+        heartbeatRunId: run.id,
         allowStandingDelegation: false,
         responsibleUserId:
           context?.cause === "company_default"
