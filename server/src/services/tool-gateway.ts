@@ -33,7 +33,7 @@ import { connectionManagementService, type ConnectionManagementContext } from ".
 import { notifyDeliveryWork, DELIVERY_QUEUES } from "./delivery-work-notifications.js";
 import { measureToolDiscovery, measureRunPhase, recordConnectionCatalogCounts } from "./execution-preparation-timing.js";
 import { nativeProviderCatalogFor } from "./native-provider-catalogs.js";
-import { callGoogleWorkspaceRest, googleWorkspaceRestAuditEndpoint } from "./google-workspace-rest-dispatch.js";
+import { callGoogleWorkspaceRest, googleWorkspaceCatalogToolTitle, googleWorkspaceRestAuditEndpoint } from "./google-workspace-rest-dispatch.js";
 import { composeConnectionInstructions } from "./connection-instructions.js";
 import { googleWorkspaceToolTarget, googleWorkspaceGrantedScopes, isGoogleWorkspaceToolGranted } from "@paperclipai/shared";
 import { isInsufficientConnectionScope, INSUFFICIENT_CONNECTION_SCOPE_MESSAGE } from "./connection-permission-errors.js";
@@ -60,7 +60,7 @@ import { githubChatReviewService } from "./chat-github-reviews.js";
 import { runIdentityContexts } from "@paperclipai/db";
 import { executeSpekoVoiceTool, spekoToolsForSession } from "./voice/speko-agent-tools.js";
 import { captureRunIdentity } from "./run-identity.js";
-import { emitConnectionInvoked } from "./connector-telemetry.js";
+import { emitAggregatorAppRequestsFromToolCall, emitConnectionInvoked } from "./connector-telemetry.js";
 import {
   NO_MANAGED_GITHUB_IDENTITY,
   resolveAgentScopedGitHubOrganizationGrant,
@@ -2055,7 +2055,7 @@ export function createToolGatewayService(
         };
         return {
           name: gatewayToolName,
-          displayName: catalogEntry.title ?? catalogEntry.toolName,
+          displayName: googleWorkspaceCatalogToolTitle(connection.config.sourceTemplateKey, catalogEntry.toolName, catalogEntry.title) ?? catalogEntry.toolName,
           description:
             gmailArchiveToolDescription(
               connection,
@@ -8813,6 +8813,15 @@ export function createToolGatewayService(
       // The older app finished the call: the answers it used are spent.
       for (const used of legacyAnswered.splice(0)) await settleElicitationRound(used.row, elicitationCall!, used.responses, invocationId);
       const upstreamPending = extractRemoteMcpPending(payloadRecord, String(connection.config.sourceTemplateKey ?? ""), entry.toolName);
+      emitAggregatorAppRequestsFromToolCall({
+        companyId: session.companyId,
+        provider: connection.config.sourceTemplateKey,
+        toolName: entry.toolName,
+        parameters,
+        response: payloadRecord,
+        origin: session.agentId ? "agent" : session.actorType === "user" ? "user" : null,
+        pendingAuthorization: upstreamPending?.kind === "authorization",
+      });
       if (upstreamPending) {
         await retainUpstreamHandoff(invocationId, upstreamPending);
         throw new ToolGatewayHttpError(409, "Complete the provider's authorization or approval before continuing. The original call has not been replayed.", "provider_interaction_required", { upstreamPending, invocationId });

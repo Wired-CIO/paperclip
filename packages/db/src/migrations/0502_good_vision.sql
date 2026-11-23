@@ -1,6 +1,6 @@
 -- paperclip:migration-compat online_compatible: new tables, a nullable projects.category_id column and its foreign key (validated against an all-NULL column of the small projects table, so the scan is short), and additive projects:access grant rows the previous release ignores; every statement is guarded so a re-run is a no-op.
 -- WiredCIO fork migration (originally 0280_good_vision on wiredcio/deploy,
--- renumbered after upstream's 0431, then 0441, 0452 and 0500). Production
+-- renumbered after upstream's 0431, then 0441, 0452, 0500 and 0501). Production
 -- already applied the original, so every statement is idempotent: re-running
 -- against an up-to-date database is a no-op.
 CREATE TABLE IF NOT EXISTS "org_edges" (

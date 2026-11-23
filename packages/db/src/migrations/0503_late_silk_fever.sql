@@ -1,8 +1,8 @@
--- paperclip:migration-compat online_compatible: the drop/add pair only runs when projects.category_id's foreign key is not yet ON DELETE SET NULL (0501 creates it that way, and production already has it), and the re-added key validates an all-NULL column of the small projects table.
+-- paperclip:migration-compat online_compatible: the drop/add pair only runs when projects.category_id's foreign key is not yet ON DELETE SET NULL (0502 creates it that way, and production already has it), and the re-added key validates an all-NULL column of the small projects table.
 -- WiredCIO fork migration (originally 0281_late_silk_fever on wiredcio/deploy,
--- renumbered after upstream's 0431, then 0441, 0452 and 0500). Converts the
+-- renumbered after upstream's 0431, then 0441, 0452, 0500 and 0501). Converts the
 -- projects.category_id foreign key to ON DELETE SET NULL. Idempotent: the
--- drop/add pair always ends in the same state, and 0501 already creates the
+-- drop/add pair always ends in the same state, and 0502 already creates the
 -- constraint with SET NULL on a fresh database.
 DO $$ BEGIN
   IF EXISTS (
