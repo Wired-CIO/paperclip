@@ -358,8 +358,14 @@ export async function accountRunCost(db: Db, runId: string, hooks: BudgetService
     // on a subscription seat (WiredCIO) settles at $0 the same way, whether
     // the process vanished or a server shutdown took it down with the run,
     // unless the capture itself failed, which settles as possibly incomplete spend.
+    // A verified legacy process settlement proof (closedLegacyReceiptSource) takes
+    // the receipt-unavailable path even on a subscription seat, so the run is
+    // still named in Costs; without that proof the $0 settlement above applies.
+    const lostSubscription = lostSubscriptionRun(run);
+    const legacyStopVerified = lostSubscription && run.legacyProcessSettlement != null
+      && await readProviderReceiptClosure(tx, run.id) === "closed";
     const receiptUnavailable = !preProviderFailure
-      && (captureFailed || (!lostSubscriptionRun(run) && object(run.usageJson).accountingReceiptReady === false));
+      && (captureFailed || ((!lostSubscription || legacyStopVerified) && object(run.usageJson).accountingReceiptReady === false));
     const receiptClosure = captureFailed ? "timed_out" as const
       : receiptUnavailable ? await readProviderReceiptClosure(tx, run.id) : null;
     if (receiptUnavailable && !receiptClosure) return false;
