@@ -783,7 +783,9 @@ describe.skipIf(!support.supported)("public MCP OAuth and tool boundary", () => 
     await expect(execute(f.tokens.access_token, "paperclip_search_tasks", { companyId: f.company.id, assigneeUserId: "../other" })).rejects.toThrow();
 
     dispatch.mockResolvedValue({ id: randomUUID(), title: "t" });
-    await execute(f.tokens.access_token, "paperclip_create_task", { companyId: f.company.id, requestId: randomUUID(), title: "Backlog idea", description: "" });
+    await execute(f.tokens.access_token, "paperclip_create_task", { companyId: f.company.id, requestId: randomUUID(), title: "Unassigned idea", description: "" });
+    expect(dispatch.mock.calls.at(-1)?.[3]).toMatchObject({ status: "todo" });
+    await execute(f.tokens.access_token, "paperclip_create_task", { companyId: f.company.id, requestId: randomUUID(), title: "Backlog idea", description: "", status: "backlog" });
     expect(dispatch.mock.calls.at(-1)?.[3]).toMatchObject({ status: "backlog" });
     expect(dispatch.mock.calls.at(-1)?.[3]).not.toHaveProperty("assigneeAgentId");
     await execute(f.tokens.access_token, "paperclip_create_task", { companyId: f.company.id, requestId: randomUUID(), title: "Mine", description: "", assigneeUserId: "me", priority: "high" });
