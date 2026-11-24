@@ -301,7 +301,7 @@ function GitHubConnectionSummary({
       <div className="divide-y divide-border border-y border-border">
         <div className="py-3">
           <div className="text-sm font-medium text-foreground">GitHub account</div>
-          <a className="text-sm text-muted-foreground hover:underline" href={`https://github.com/${encodeURIComponent(github.login)}`} target="_blank" rel="noreferrer">
+          <a className={cn("text-sm text-muted-foreground hover:underline", ANALYTICS_MASK_CLASS)} href={`https://github.com/${encodeURIComponent(github.login)}`} target="_blank" rel="noreferrer">
             @{github.login}
           </a>
         </div>
