@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { AgentDetail, AgentRuntimeState, HeartbeatRun, Issue } from "@paperclipai/shared";
 import { describe, expect, it, vi } from "vitest";
 import { AgentOverview } from "./AgentDetail";
+import { DialogProvider } from "../context/DialogContext";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { queryKeys } from "../lib/queryKeys";
 
@@ -54,7 +55,7 @@ describe("AgentOverview", () => {
     } as unknown as AgentRuntimeState;
 
     const markup = renderToStaticMarkup(
-      <QueryClientProvider client={new QueryClient()}>
+      <QueryClientProvider client={new QueryClient()}><DialogProvider>
         <TooltipProvider>
         <AgentOverview
           agent={agent}
@@ -66,7 +67,7 @@ describe("AgentOverview", () => {
           agentRouteId="codexcoder"
         />
         </TooltipProvider>
-      </QueryClientProvider>,
+      </DialogProvider></QueryClientProvider>,
     );
 
     for (const label of ["Activity", "Runs", "Costs", "Budget used", "Profile", "Skills", "Recent tasks"]) {
@@ -76,6 +77,8 @@ describe("AgentOverview", () => {
       expect(markup).toContain(`href="/agents/codexcoder/${page}"`);
     }
     expect(markup).toContain("2 enabled");
+    expect(markup).toContain("Explore skills");
+    expect(markup).toContain('href="/agents/codexcoder/skills"');
     expect(markup).toContain("Design Guide");
     expect(markup).toContain("Simplify agent information architecture");
     expect(markup).toContain("PAP-42");
@@ -106,7 +109,7 @@ describe("AgentOverview", () => {
       access: { canAssignTasks: true, taskAssignSource: "explicit_grant", membership: null, grants: [] },
     } as unknown as AgentDetail;
     return renderToStaticMarkup(
-      <QueryClientProvider client={client}>
+      <QueryClientProvider client={client}><DialogProvider>
         <AgentOverview
           agent={agent}
           runs={[] as HeartbeatRun[]}
@@ -115,7 +118,7 @@ describe("AgentOverview", () => {
           skillNames={[]}
           agentRouteId="sharedagent"
         />
-      </QueryClientProvider>,
+      </DialogProvider></QueryClientProvider>,
     );
   }
 
@@ -198,7 +201,7 @@ describe("AgentOverview", () => {
     } as unknown as HeartbeatRun;
 
     const markup = renderToStaticMarkup(
-      <QueryClientProvider client={new QueryClient()}>
+      <QueryClientProvider client={new QueryClient()}><DialogProvider><TooltipProvider>
         <AgentOverview
           agent={agent}
           runs={[run]}
@@ -207,7 +210,7 @@ describe("AgentOverview", () => {
           skillNames={[]}
           agentRouteId="appdev"
         />
-      </QueryClientProvider>,
+      </TooltipProvider></DialogProvider></QueryClientProvider>,
     );
 
     expect(markup).toContain("Claude usage");
@@ -251,7 +254,7 @@ describe("AgentOverview", () => {
     } as unknown as HeartbeatRun;
 
     const markup = renderToStaticMarkup(
-      <QueryClientProvider client={new QueryClient()}>
+      <QueryClientProvider client={new QueryClient()}><DialogProvider><TooltipProvider>
         <AgentOverview
           agent={agent}
           runs={[run]}
@@ -260,7 +263,7 @@ describe("AgentOverview", () => {
           skillNames={[]}
           agentRouteId="connectability"
         />
-      </QueryClientProvider>,
+      </TooltipProvider></DialogProvider></QueryClientProvider>,
     );
 
     expect(markup).toContain("Near limit");
@@ -300,7 +303,7 @@ describe("AgentOverview", () => {
     } as unknown as HeartbeatRun;
 
     const markup = renderToStaticMarkup(
-      <QueryClientProvider client={new QueryClient()}>
+      <QueryClientProvider client={new QueryClient()}><DialogProvider><TooltipProvider>
         <AgentOverview
           agent={agent}
           runs={[run]}
@@ -309,7 +312,7 @@ describe("AgentOverview", () => {
           skillNames={[]}
           agentRouteId="ceo"
         />
-      </QueryClientProvider>,
+      </TooltipProvider></DialogProvider></QueryClientProvider>,
     );
 
     expect(markup).not.toContain("Claude usage");
@@ -348,7 +351,7 @@ describe("AgentOverview", () => {
     } as unknown as HeartbeatRun;
 
     const markup = renderToStaticMarkup(
-      <QueryClientProvider client={new QueryClient()}>
+      <QueryClientProvider client={new QueryClient()}><DialogProvider><TooltipProvider>
         <AgentOverview
           agent={agent}
           runs={[run]}
@@ -357,7 +360,7 @@ describe("AgentOverview", () => {
           skillNames={[]}
           agentRouteId="bedrock-coder"
         />
-      </QueryClientProvider>,
+      </TooltipProvider></DialogProvider></QueryClientProvider>,
     );
 
     expect(markup).not.toContain("Claude usage");
@@ -382,7 +385,7 @@ describe("AgentOverview", () => {
     } as unknown as AgentDetail;
 
     const markup = renderToStaticMarkup(
-      <QueryClientProvider client={new QueryClient()}>
+      <QueryClientProvider client={new QueryClient()}><DialogProvider><TooltipProvider>
         <AgentOverview
           agent={agent}
           runs={[]}
@@ -391,7 +394,7 @@ describe("AgentOverview", () => {
           skillNames={[]}
           agentRouteId="salesengineer"
         />
-      </QueryClientProvider>,
+      </TooltipProvider></DialogProvider></QueryClientProvider>,
     );
 
     expect(markup).toContain("Claude usage");
@@ -425,7 +428,7 @@ describe("AgentOverview", () => {
     } as unknown as HeartbeatRun;
 
     const markup = renderToStaticMarkup(
-      <QueryClientProvider client={new QueryClient()}>
+      <QueryClientProvider client={new QueryClient()}><DialogProvider><TooltipProvider>
         <AgentOverview
           agent={agent}
           runs={[run]}
@@ -434,7 +437,7 @@ describe("AgentOverview", () => {
           skillNames={[]}
           agentRouteId="salesengineer-2"
         />
-      </QueryClientProvider>,
+      </TooltipProvider></DialogProvider></QueryClientProvider>,
     );
 
     expect(markup).toContain("Claude usage");

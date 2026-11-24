@@ -84,6 +84,14 @@ export const publicMcpCapabilities: Capability[] = [
     run: async (p, a, api) => ({ agents: rows(await api(p, "GET", `/companies/${a.companyId}/agents`)).map((v) => pick(v, ["id", "name", "role", "title", "status", "capabilities"])) }),
   },
   {
+    name: "paperclip_list_people", description: "List the people (active human members) of the authorized company. Use a returned userId as assigneeUserId to give a task to a person instead of an agent.",
+    schema: z.object(company).strict(),
+    run: async (p, a, api) => ({ people: rows(object(await api(p, "GET", `/companies/${a.companyId}/user-directory`)).users).map((v) => {
+      const member = object(v);
+      return { userId: member.principalId, name: object(member.user).name ?? null, role: member.membershipRole ?? null };
+    }) }),
+  },
+  {
     name: "paperclip_list_projects", description: "List projects in the authorized company.",
     schema: z.object(company).strict(),
     run: async (p, a, api) => ({ projects: rows(await api(p, "GET", `/companies/${a.companyId}/projects`)).map((v) => pick(v, ["id", "name", "description", "status"])) }),
@@ -125,25 +133,25 @@ export const publicMcpCapabilities: Capability[] = [
   },
   {
     name: "paperclip_create_task", write: true,
-    description: "Create one durable task. Assign it to a Paperclip agent to delegate work, to a person (\"me\" is the connected person), or to nobody to leave it in the backlog; never both an agent and a person. An agent assignment may schedule autonomous execution and consume the company's configured model budget. Status defaults to todo when assigned and backlog when not. Normal permissions, approval gates and agent availability apply. Returns immediately; retrieve progress later. Never retry with a new requestId after an uncertain result.",
+    description: "Create one durable task. Assign it to a Paperclip agent to delegate work, to a person (\"me\" is the connected person), or to nobody to leave it unassigned; never both an agent and a person. An agent assignment may schedule autonomous execution and consume the company's configured model budget. Status defaults to todo; pass status \"backlog\" to park it. Normal permissions, approval gates and agent availability apply. Returns immediately; retrieve progress later. Never retry with a new requestId after an uncertain result.",
     schema: z.object({
       ...company, requestId, title: z.string().trim().min(1).max(200), description: z.string().max(50000),
       assigneeAgentId: z.uuid().optional(), assigneeUserId: personRef.optional(),
       projectId: z.uuid().optional(), parentId: z.uuid().optional(),
       priority: z.enum(ISSUE_PRIORITIES).optional(), status: z.enum(["backlog", "todo"]).optional(),
-    }).strict().refine((v) => !(v.assigneeAgentId && v.assigneeUserId), "Assign the task to an agent or a person, not both."),
+    }).strict().refine((v) => !(v.assigneeAgentId && v.assigneeUserId), { message: "Assign either assigneeAgentId or assigneeUserId, not both. Omit both to leave the task unassigned.", path: ["assigneeUserId"] }),
     run: async (p, a, api, origin) => {
-      const assigned = Boolean(a.assigneeAgentId || a.assigneeUserId);
       const result = await api(p, "POST", `/companies/${a.companyId}/issues`, {
         title: a.title, description: a.description,
         ...(a.assigneeAgentId ? { assigneeAgentId: a.assigneeAgentId } : {}),
         ...(a.assigneeUserId ? { assigneeUserId: resolvePerson(p, a.assigneeUserId) } : {}),
         ...(a.projectId ? { projectId: a.projectId } : {}), ...(a.parentId ? { parentId: a.parentId } : {}),
-        ...(a.priority ? { priority: a.priority } : {}), status: a.status ?? (assigned ? "todo" : "backlog"),
+        ...(a.priority ? { priority: a.priority } : {}), status: a.status ?? "todo",
         idempotencyKey: `mcp:${hashMcpSecret(p.grant.companyId + ":" + p.grant.userId)}:${a.requestId}`,
       });
       return { task: pick(result, taskFields), url: origin + "/" + pathId(p.company.issuePrefix) + "/issues/" + pathId(object(result).identifier ?? object(result).id),
-        scheduling: "Submitted to normal Paperclip scheduling. Creation does not guarantee execution has started." };
+        scheduling: a.assigneeAgentId ? "Submitted to normal Paperclip scheduling. Creation does not guarantee execution has started."
+          : a.assigneeUserId ? "Assigned to a person. No agent run was started." : "Left unassigned. No agent run was started." };
     },
   },
   {

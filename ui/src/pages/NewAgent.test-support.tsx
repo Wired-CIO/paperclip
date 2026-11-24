@@ -87,7 +87,7 @@ vi.mock("@/lib/router", () => ({
   useSearchParams: () => [state.params],
 }));
 vi.mock("@/components/AgentConfigForm", () => ({
-  ModelDropdown: ({
+  ModelDropdown: vi.fn(({
     value,
     onChange,
   }: {
@@ -99,7 +99,7 @@ vi.mock("@/components/AgentConfigForm", () => ({
       value={value}
       onChange={(e) => onChange(e.target.value)}
     />
-  ),
+  )),
   AdapterLoginPanel: ({ onConnected }: { onConnected: (id: string) => void }) => (
     <button onClick={() => onConnected("login-session")}>
       Complete subscription login

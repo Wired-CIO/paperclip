@@ -22,6 +22,9 @@ const ROUTES_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "routes")
 const ACCESS_HELPERS = [
   "getAccessibleResource",
   "getVisibleIssue",
+  // Upstream's routes/readable-issue.ts: getAccessibleResource plus an issue:read
+  // decision (which carries deny_project_visibility) rendered as the same 404.
+  "getReadableIssue",
   "assertIssueReadAllowed",
   "isIssueHiddenByProjectVisibility",
   "filterIssuesForActor",
@@ -31,7 +34,7 @@ const ACCESS_HELPERS = [
   "assertAgentIssueCommentAllowed",
 ];
 const ACCESS_HELPER_CALL = new RegExp(`\\b(?:${ACCESS_HELPERS.join("|")})\\(`);
-const WRAPPING_HELPER_CALL = /\b(?:getAccessibleResource|getVisibleIssue)\(/;
+const WRAPPING_HELPER_CALL = /\b(?:getAccessibleResource|getVisibleIssue|getReadableIssue)\(/;
 const RESPONSE = /\bres\s*\.\s*(?:status|json|send|end|sendStatus)\(|\.pipe\(res\)/;
 const NOT_FOUND = /\b404\b/;
 // A route handler registered at the router's indentation ends here.
