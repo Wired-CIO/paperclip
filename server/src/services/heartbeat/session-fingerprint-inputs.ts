@@ -76,6 +76,9 @@ export const ENVIRONMENT_CONFIG_SESSION_INPUTS = {
   runnerLifecycleMode: kept(`${NATIVE_LIFECYCLE} An explicit switch to warm also deliberately starts a new session.`),
   runnerIdleTimeoutMs: kept(NATIVE_LIFECYCLE),
   reuseLease: kept(`Decides whether a remote sandbox run defaults to warm. ${NATIVE_LIFECYCLE}`),
+  paperclipReachability: kept(
+    "CH-6: resolves the origin baked into the Paperclip runtime MCP server URLs (project tools, connection gateways) that are staged into the provider session. A change points the thread's own tools at a different address, so a warm session started under the old origin must not be reused.",
+  ),
   useHostAuth: kept("SSH authentication."),
   tailscaleConnectionId: kept("SSH network path."),
   tailscaleDeviceId: kept("SSH target machine."),
