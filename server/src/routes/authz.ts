@@ -511,7 +511,7 @@ export async function isProjectHiddenByProjectVisibility(
  * resource named in the URL (e.g. "Work product not found" when the issue is
  * a work product's parent) so the body matches a random id byte for byte.
  */
-export async function getVisibleIssue<T extends VisibilityCheckedIssue>(
+export async function getVisibleIssue<T extends VisibilityCheckedIssue & DashboardConversationFields>(
   req: Request,
   res: Response,
   access: ProjectVisibilityDecider,
@@ -523,6 +523,7 @@ export async function getVisibleIssue<T extends VisibilityCheckedIssue>(
   if (
     !resolved ||
     !hasCompanyAccess(req, resolved.companyId) ||
+    !dashboardConversationReadable(req.actor, resolved) ||
     await isIssueHiddenByProjectVisibility(req, access, resolved)
   ) {
     res.status(404).json(notFoundBody);
