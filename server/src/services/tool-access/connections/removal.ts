@@ -362,15 +362,16 @@ async function removeConnection(
     // finish the job: the refs on the connection row are what a resumed removal
     // reads to find the secrets it still owes a revocation.
     //
-    // CH-2: route through the single binding writer instead of a private
-    // delete. Grants were just revoked above, so its own active-grants query
-    // contributes nothing; passing a zeroed-out copy of the connection's own
-    // refs makes this a sync to the empty set rather than a second code path.
-    const removedSecretBindingsCount = await syncConnectionCredentialBindings(db, {
-      ...connection,
-      credentialRefs: [],
-      credentialSecretRefs: [],
-    });
+    const removedSecretBindings = await db
+      .delete(companySecretBindings)
+      .where(
+        and(
+          eq(companySecretBindings.companyId, connection.companyId),
+          eq(companySecretBindings.targetType, "tool_connection"),
+          eq(companySecretBindings.targetId, connection.id),
+        ),
+      )
+      .returning({ id: companySecretBindings.id });
 
     const removedInstalls = await db
       .delete(toolConnectionInstalls)
@@ -662,13 +663,22 @@ async function removeConnection(
         );
     }
 
+    // WiredCIO CH-2: user-secret declarations are what lets a resumed removal
+    // resolve a personal grant's token, so they are cleared only once every
+    // secret is gone, through the single binding writer.
+    await syncConnectionCredentialBindings(db, {
+      ...connection,
+      credentialRefs: [],
+      credentialSecretRefs: [],
+    });
+
     return {
       connection: toConnection(cleared ?? archived.connection),
       removal: {
         secretsRevoked,
         secretsRetainedShared: retained.length,
         credentialRefsCleared,
-        secretBindingsRemoved: removedSecretBindingsCount,
+        secretBindingsRemoved: removedSecretBindings.length,
         grantsRevoked: grantsToRevoke.length,
         installsRemoved: removedInstalls.length,
         appProfile: appProfileOutcome,
