@@ -47,9 +47,10 @@ function git(args: string[]): string | null {
 
 /** Journal migrations split by whether the merge base has them, or null without git history. */
 function migrationsAddedSince(requestedBase: string | null): { base: string; prior: string[]; files: string[] } | null {
-  // WiredCIO fork: upstream's own migrations are classified upstream, so a
-  // clone with an `upstream` remote judges only what the fork adds.
-  for (const ref of requestedBase ? [requestedBase] : ["upstream/master", "origin/master", "master"]) {
+  // WiredCIO fork: upstream's own migrations are classified upstream, so judge only what the
+  // fork adds: against upstream/master when that remote exists, else the fork's deploy branch
+  // (origin/master here is a stale WiredCIO branch and would flag upstream's migrations).
+  for (const ref of requestedBase ? [requestedBase] : ["upstream/master", "origin/wiredcio/deploy", "origin/master", "master"]) {
     const base = git(["merge-base", "HEAD", ref])?.trim();
     if (!base) continue;
     // ls-tree lists the current directory (the migrations folder) of the base.
